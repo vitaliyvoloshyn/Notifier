@@ -34,7 +34,7 @@ class TelegramUser(AbstractBaseUser, PermissionsMixin):
     username = models.CharField(max_length=32, blank=True, null=True)
 
     # Справжнє ім'я з Телеграму для привітань (First Name + Last Name)
-    first_name = models.CharField(max_length=150, blank=True)
+    full_name = models.CharField(max_length=150, blank=True)
 
     # Додаткові поля для логіки додатка
     is_active = models.BooleanField(default=True)

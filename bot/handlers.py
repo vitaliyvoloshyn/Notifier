@@ -9,13 +9,16 @@ router = Router()
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     tg_user = message.from_user
+    full_name = f"{tg_user.first_name or ''} {tg_user.last_name or ''}".strip()[:150]
+    greeting_name = full_name or 'Друже'
 
     # Шукаємо за telegram_id; оновлюємо або створюємо з даними з defaults
     user, created = await TelegramUser.objects.aupdate_or_create(
         telegram_id=tg_user.id,
         defaults={
             'username': tg_user.username,
-            'first_name': tg_user.first_name or '',
+            'full_name': full_name,
+            'is_active': True,
         }
     )
 
@@ -25,9 +28,9 @@ async def cmd_start(message: Message):
         await user.asave(update_fields=['password'])
 
         await message.answer(
-            f"Привіт, {user.first_name}! Ви успішно зареєстровані. "
+            f"Привіт, {greeting_name}! Ви успішно зареєстровані. "
             "Надішліть текст та час, щоб створити перше нагадування."
         )
     else:
-        await message.answer(f"З поверненням, {user.first_name}! Дані профілю оновлено.")
+        await message.answer(f"З поверненням, {greeting_name}!")
 
