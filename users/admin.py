@@ -3,6 +3,6 @@ from .models import TelegramUser
 
 @admin.register(TelegramUser)
 class TelegramUserAdmin(admin.ModelAdmin):
-    list_display = ('telegram_id', 'username', 'full_name', 'is_active', 'date_joined')
+    list_display = ('telegram_id', 'username', 'full_name', 'timezone', 'is_active', 'date_joined')
     search_fields = ('telegram_id', 'username', 'full_name')
     list_filter = ('is_active', 'is_staff')

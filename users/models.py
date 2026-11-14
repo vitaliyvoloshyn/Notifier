@@ -36,6 +36,14 @@ class TelegramUser(AbstractBaseUser, PermissionsMixin):
     # Справжнє ім'я з Телеграму для привітань (First Name + Last Name)
     full_name = models.CharField(max_length=150, blank=True)
 
+    # IANA timezone, який використовується як типовий для нових нагадувань.
+    timezone = models.CharField(
+        max_length=64,
+        default="Europe/Kyiv",
+        verbose_name="Часовий пояс",
+        help_text="IANA timezone, наприклад Europe/Kyiv.",
+    )
+
     # Додаткові поля для логіки додатка
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)  # Потрібно для доступу в адмінку (якщо знадобиться)
