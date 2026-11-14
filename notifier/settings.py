@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'users',
     'bot',
+    'reminders',
 ]
 
 AUTH_USER_MODEL = 'users.TelegramUser'
