@@ -170,3 +170,70 @@ class ReminderServiceTests(TestCase):
         # переносить повторення на першу доступну хвилину — 04:00.
         self.assertEqual(local_next.hour, 4)
         self.assertEqual(local_next.minute, 0)
+
+
+class ReminderDispatchTests(TestCase):
+    def setUp(self):
+        self.author = TelegramUser.objects.create_user(telegram_id=3001, username="dispatch_author")
+        self.assignee = TelegramUser.objects.create_user(telegram_id=3002, username="dispatch_assignee")
+        self.reminder = Reminder.objects.create(
+            title="Повторне нагадування",
+            author=self.author,
+            first_reminder_at=timezone.now() - timedelta(minutes=1),
+            next_reminder_at=timezone.now() - timedelta(minutes=1),
+            timezone="Europe/Kyiv",
+            recurrence_type=Reminder.RecurrenceType.DAILY,
+        )
+        ReminderParticipant.objects.create(
+            reminder=self.reminder,
+            user=self.assignee,
+            role=ReminderParticipant.Role.ASSIGNEE,
+            added_by=self.author,
+        )
+        self.occurrence = ReminderOccurrence.objects.create(
+            reminder=self.reminder,
+            scheduled_at=self.reminder.first_reminder_at,
+            status=ReminderOccurrence.Status.PROCESSING,
+        )
+        self.response = ReminderResponse.objects.create(
+            occurrence=self.occurrence,
+            assignee=self.assignee,
+        )
+
+    def test_successful_delivery_sets_deadline_and_event(self):
+        from .dispatch import _record_delivery
+
+        _record_delivery(self.response.pk, message_id=987)
+        self.response.refresh_from_db()
+        self.assertEqual(self.response.delivery_status, ReminderResponse.DeliveryStatus.SENT)
+        self.assertEqual(self.response.telegram_message_id, 987)
+        self.assertIsNotNone(self.response.deadline_at)
+        self.assertEqual(
+            self.response.events.get().event_type,
+            ReminderResponseEvent.EventType.NOTIFIED,
+        )
+
+    def test_finished_recurring_occurrence_creates_next_one(self):
+        from .dispatch import _record_delivery, _finish_occurrence
+
+        _record_delivery(self.response.pk, message_id=988)
+        _finish_occurrence(self.occurrence.pk)
+        self.occurrence.refresh_from_db()
+        self.reminder.refresh_from_db()
+        self.assertEqual(self.occurrence.status, ReminderOccurrence.Status.COMPLETED)
+        self.assertEqual(self.reminder.occurrences.count(), 2)
+        next_occurrence = self.reminder.occurrences.exclude(pk=self.occurrence.pk).get()
+        self.assertEqual(next_occurrence.responses.count(), 1)
+        self.assertEqual(next_occurrence.responses.get().assignee, self.assignee)
+
+    def test_failed_delivery_keeps_occurrence_retryable(self):
+        from .dispatch import _record_delivery, _finish_occurrence
+
+        _record_delivery(self.response.pk, error="temporary Telegram error")
+        _finish_occurrence(self.occurrence.pk)
+        self.occurrence.refresh_from_db()
+        self.assertEqual(self.occurrence.status, ReminderOccurrence.Status.FAILED)
+        self.assertEqual(
+            self.response.events.get().event_type,
+            ReminderResponseEvent.EventType.DELIVERY_FAILED,
+        )
