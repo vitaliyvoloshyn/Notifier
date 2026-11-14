@@ -21,7 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 def _claim_due_occurrences(limit: int = 50):
-    """Захоплює прострочені/невдалі спрацювання для одного циклу доставки."""
+    """
+Захоплення подій в роботу
+Ця функція безпечно обирає порцію нагадувань, час яких уже настав, і «бронює» їх за поточним воркером.
+• Атомарне блокування (transaction.atomic + select_for_update): База даних блокує вибрані рядки ReminderOccurrence до
+завершення транзакції. Це захищає від стану гонитви (race condition), якщо ви запустите кілька процесів планувальника одночасно.
+• Критерії відбору: Беруться лише активні нагадування (reminder__is_active=True), час яких вже настав (scheduled_at__lte=now),
+у трьох можливих станах:
+	1. SCHEDULED — нові заплановані події.
+	2. FAILED — події, які не вдалося доставити в попередньому циклі.
+	3. PROCESSING зі старим часом старту (processing_started_at < stale_before, тобто понад 10 хвилин тому) — захист
+	від «зависання», якщо попередній процес воркера впав чи був примусово перезапущений посеред роботи.
+• Зміна статусу: Для всіх знайдених записів встановлюється статус PROCESSING і фіксується час початку обробки. Функція
+повертає список ID захоплених подій.
+    """
     now = timezone.now()
     stale_before = now - timedelta(minutes=10)
     claimed = []
@@ -50,6 +63,15 @@ def _claim_due_occurrences(limit: int = 50):
 
 
 def _get_pending_responses(occurrence_id: int):
+    """
+    Отримання списку отримувачів
+    Один запис ReminderOccurrence (сама подія в часі) може мати багато отримувачів (ReminderResponse), якщо нагадування групове.
+    • Фільтрація: Функція дістає лише тих отримувачів (status=PENDING), яким повідомлення ще не відправлялося
+    (delivery_status=PENDING) або попередня спроба надсилання закінчилася помилкою (delivery_status=FAILED). Тим,
+    хто вже отримав повідомлення, дублікати не надсилаються.
+    • Оптимізація запитів (select_related): Одразу підтягує дані користувача (assignee) та самого нагадування
+    (occurrence__reminder) одним SQL-запитом, щоб уникнути помилок доступу до БД в асинхронному циклі пізніше.
+    """
     return list(
         ReminderResponse.objects.select_related("assignee", "occurrence__reminder")
         .filter(occurrence_id=occurrence_id, status=ReminderResponse.Status.PENDING)
@@ -62,6 +84,18 @@ def _get_pending_responses(occurrence_id: int):
 
 
 def _record_delivery(response_id: int, *, message_id: int | None = None, error: str = ""):
+    """
+    Фіксація результату відправки та аудит
+    Оновлює стан доставки для конкретного користувача після спроби відправити повідомлення в Telegram.
+    • Сценарій помилки (if error:):
+        • Переводить delivery_status у FAILED і зберігає текст помилки (обрізаний до 4000 символів).
+        • Записує подію DELIVERY_FAILED в історію (ReminderResponseEvent) для аудиту.
+    • Сценарій успіху:
+        • Переводить delivery_status у SENT і очищає поле помилок.
+        • Зберігає telegram_message_id (це знадобиться в майбутньому, якщо бот захоче відредагувати або видалити це повідомлення).
+        • Розраховує deadline_at — крайній термін, до якого користувач має відреагувати на нагадування (натиснути «Виконано» тощо).
+        • Створює запис NOTIFIED у журналі подій ReminderResponseEvent.
+    """
     now = timezone.now()
     with transaction.atomic():
         response = ReminderResponse.objects.select_for_update().get(pk=response_id)
@@ -94,7 +128,20 @@ def _record_delivery(response_id: int, *, message_id: int | None = None, error: 
 
 
 def _finish_occurrence(occurrence_id: int):
-    """Завершує цикл доставки та створює наступне календарне спрацювання."""
+    """
+    Завершення циклу та планування наступного разу
+    Викликається після того, як воркер пройшовся по всіх отримувачах конкретної події.
+    • Перевірка повноти доставки: Функція перевіряє, чи не залишилося отримувачів зі статусом FAILED або PENDING. Якщо
+    хоча б одному користувачу повідомлення не дійшло, вся подія occurrence переводиться у статус FAILED (щоб через
+    15 секунд воркер знову її підхопив і спробував доставити тим, хто не отримав).
+    • Закриття поточної події: Якщо всі успішно отримали нагадування, подія отримує статус COMPLETED і час завершення completed_at.
+    • Генерація наступного спрацювання (для повторюваних нагадувань):
+        • Якщо нагадування все ще активне (reminder.is_active), викликається calculate_next_occurrence(...).
+        • Якщо нагадування одноразове, next_at поверне None.
+        • Якщо воно періодичне (наприклад, щодня о 9:00), створюється новий запис ReminderOccurrence на майбутню дату,
+        а через bulk_create одразу генеруються записи ReminderResponse для всіх призначених виконавців (або для автора
+        нагадування, якщо виконавців не вказано).
+    """
     with transaction.atomic():
         occurrence = (
             ReminderOccurrence.objects.select_for_update()
@@ -144,7 +191,16 @@ def _finish_occurrence(occurrence_id: int):
 
 
 async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
-    """Надсилає всі повідомлення для спрацювань, час яких настав."""
+    """
+    Головний асинхронний оркестратор
+    Зв'язує всі попередні синхронні функції з асинхронним клієнтом aiogram:
+    1. Захоплює пачку подій через _claim_due_occurrences.
+    2. Для кожної події отримує список отримувачів через _get_pending_responses.
+    3. Формує текст повідомлення з урахуванням індивідуального часового поясу нагадування (ZoneInfo(reminder.timezone)).
+    4. Намагається відправити повідомлення через await bot.send_message(...) та фіксує результат (_record_delivery),
+    збираючи статистику (sent / failed).
+    5. Наприкінці кожної події викликає _finish_occurrence, щоб закрити її та запланувати наступну.
+    """
     occurrence_ids = await sync_to_async(_claim_due_occurrences)(limit)
     stats = {"occurrences": len(occurrence_ids), "sent": 0, "failed": 0}
 
