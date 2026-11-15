@@ -5,7 +5,7 @@ from aiogram import Bot
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from reminders.dispatch import dispatch_due_occurrences
+from reminders.dispatch import dispatch_due_occurrences, process_response_timeouts
 
 
 class Command(BaseCommand):
@@ -32,10 +32,13 @@ class Command(BaseCommand):
         async with Bot(token=token) as bot:
             self.stdout.write(self.style.SUCCESS("Планувальник запущено."))
             while True:
+                timeout_stats = await process_response_timeouts(bot, limit=batch_size)
                 stats = await dispatch_due_occurrences(bot, limit=batch_size)
-                if stats["occurrences"]:
+                if stats["occurrences"] or timeout_stats["deferred"] or timeout_stats["expired"]:
                     self.stdout.write(
-                        f"Оброблено: {stats['occurrences']}; доставлено: {stats['sent']}; помилок: {stats['failed']}"
+                        f"Спрацювань: {stats['occurrences']}; доставлено: {stats['sent']}; помилок: {stats['failed']}; "
+                        f"відтерміновано: {timeout_stats['deferred_sent']} доставлено / {timeout_stats['deferred_failed']} помилок; "
+                        f"прострочено відповідей: {timeout_stats['expired']}"
                     )
                 if once:
                     break

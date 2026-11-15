@@ -16,6 +16,8 @@ from .models import (
     ReminderResponseEvent,
 )
 from .services import calculate_next_occurrence
+from .responses import claim_due_deferred_responses, expire_due_responses, get_controller_telegram_ids
+from bot.keyboards import response_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +218,7 @@ async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
                 message = await bot.send_message(
                     chat_id=response.assignee.telegram_id,
                     text=text,
+                    reply_markup=response_keyboard(response.pk),
                 )
                 await sync_to_async(_record_delivery)(response.pk, message_id=message.message_id)
                 stats["sent"] += 1
@@ -227,3 +230,58 @@ async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
         await sync_to_async(_finish_occurrence)(occurrence_id)
 
     return stats
+
+
+def _get_responses_by_ids(response_ids: list[int]):
+    return list(
+        ReminderResponse.objects.select_related("assignee", "occurrence__reminder")
+        .filter(pk__in=response_ids, status=ReminderResponse.Status.PENDING)
+        .order_by("pk")
+    )
+
+
+async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
+    """Повторно доставляє відтерміновані відповіді та закриває прострочені."""
+    deferred_ids = await sync_to_async(claim_due_deferred_responses)(limit)
+    deferred_responses = await sync_to_async(_get_responses_by_ids)(deferred_ids)
+    deferred_sent = 0
+    deferred_failed = 0
+    for response in deferred_responses:
+        reminder = response.occurrence.reminder
+        local_time = timezone.localtime(response.occurrence.scheduled_at, ZoneInfo(reminder.timezone))
+        text = (
+            f"⏰ Нагадування (повторно): {reminder.title}\n"
+            f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}"
+        )
+        try:
+            message = await bot.send_message(
+                chat_id=response.assignee.telegram_id,
+                text=text,
+                reply_markup=response_keyboard(response.pk),
+            )
+            await sync_to_async(_record_delivery)(response.pk, message_id=message.message_id)
+            deferred_sent += 1
+        except Exception as exc:
+            logger.exception("Не вдалося повторно надіслати ReminderResponse id=%s", response.pk)
+            await sync_to_async(_record_delivery)(response.pk, error=str(exc))
+            deferred_failed += 1
+
+    expired = await sync_to_async(expire_due_responses)(limit)
+    notified = 0
+    for item in expired:
+        if item["notification_policy"] != Reminder.NotificationPolicy.EXCEPTIONS_ONLY and item["notification_policy"] != Reminder.NotificationPolicy.ALL_ACTIONS:
+            continue
+        try:
+            controller_ids = await sync_to_async(get_controller_telegram_ids)(item["reminder_id"])
+        except Reminder.DoesNotExist:
+            continue
+        text = (
+            f"⌛ Немає відповіді на нагадування «{item['reminder_title']}» від {item['assignee_name']}."
+        )
+        for telegram_id in controller_ids:
+            try:
+                await bot.send_message(telegram_id, text)
+                notified += 1
+            except Exception:
+                logger.exception("Не вдалося повідомити контролера %s про таймаут", telegram_id)
+    return {"deferred": len(deferred_ids), "deferred_sent": deferred_sent, "deferred_failed": deferred_failed, "expired": len(expired), "notified": notified}

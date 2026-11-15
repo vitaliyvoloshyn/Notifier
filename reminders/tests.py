@@ -237,3 +237,99 @@ class ReminderDispatchTests(TestCase):
             self.response.events.get().event_type,
             ReminderResponseEvent.EventType.DELIVERY_FAILED,
         )
+
+
+class ReminderResponseActionTests(TestCase):
+    def setUp(self):
+        self.author = TelegramUser.objects.create_user(telegram_id=4101, username="action_author")
+        self.assignee = TelegramUser.objects.create_user(telegram_id=4102, username="action_assignee")
+        self.other_user = TelegramUser.objects.create_user(telegram_id=4103, username="other_user")
+        self.reminder = Reminder.objects.create(
+            title="Перевірити відповідь",
+            author=self.author,
+            first_reminder_at=timezone.now() - timedelta(minutes=5),
+            timezone="Europe/Kyiv",
+            notification_policy=Reminder.NotificationPolicy.EXCEPTIONS_ONLY,
+        )
+        self.occurrence = ReminderOccurrence.objects.create(
+            reminder=self.reminder,
+            scheduled_at=self.reminder.first_reminder_at,
+            status=ReminderOccurrence.Status.COMPLETED,
+        )
+        self.response = ReminderResponse.objects.create(
+            occurrence=self.occurrence,
+            assignee=self.assignee,
+            delivery_status=ReminderResponse.DeliveryStatus.SENT,
+            telegram_message_id=777,
+            last_sent_at=timezone.now(),
+            deadline_at=timezone.now() + timedelta(hours=1),
+        )
+
+    def test_assignee_can_complete_own_response(self):
+        from .responses import apply_response_action
+
+        response, event = apply_response_action(
+            response_id=self.response.pk,
+            actor_telegram_id=self.assignee.telegram_id,
+            action="completed",
+            telegram_message_id=777,
+        )
+        self.assertEqual(response.status, ReminderResponse.Status.COMPLETED)
+        self.assertEqual(event.event_type, ReminderResponseEvent.EventType.COMPLETED)
+        self.assertIsNotNone(response.responded_at)
+
+    def test_another_user_cannot_answer(self):
+        from .responses import ResponseActionError, apply_response_action
+
+        with self.assertRaises(ResponseActionError):
+            apply_response_action(
+                response_id=self.response.pk,
+                actor_telegram_id=self.other_user.telegram_id,
+                action="completed",
+                telegram_message_id=777,
+            )
+
+    def test_stale_telegram_message_is_rejected(self):
+        from .responses import ResponseActionError, apply_response_action
+
+        with self.assertRaises(ResponseActionError):
+            apply_response_action(
+                response_id=self.response.pk,
+                actor_telegram_id=self.assignee.telegram_id,
+                action="completed",
+                telegram_message_id=776,
+            )
+
+    def test_defer_records_event_and_due_deferral_returns_to_delivery_queue(self):
+        from .responses import apply_response_action, claim_due_deferred_responses
+
+        response, event = apply_response_action(
+            response_id=self.response.pk,
+            actor_telegram_id=self.assignee.telegram_id,
+            action="defer",
+            defer_minutes=30,
+            telegram_message_id=777,
+        )
+        self.assertEqual(response.status, ReminderResponse.Status.PENDING)
+        self.assertEqual(event.event_type, ReminderResponseEvent.EventType.DEFERRED)
+        self.assertIsNone(response.deadline_at)
+
+        ReminderResponse.objects.filter(pk=response.pk).update(deferred_until=timezone.now() - timedelta(seconds=1))
+        claimed = claim_due_deferred_responses()
+        self.assertIn(response.pk, claimed)
+        response.refresh_from_db()
+        self.assertEqual(response.delivery_status, ReminderResponse.DeliveryStatus.PENDING)
+        self.assertIsNone(response.deferred_until)
+
+    def test_expired_response_is_marked_and_logged(self):
+        from .responses import expire_due_responses
+
+        ReminderResponse.objects.filter(pk=self.response.pk).update(deadline_at=timezone.now() - timedelta(seconds=1))
+        expired = expire_due_responses()
+        self.assertEqual(len(expired), 1)
+        self.response.refresh_from_db()
+        self.assertEqual(self.response.status, ReminderResponse.Status.EXPIRED)
+        self.assertEqual(
+            self.response.events.get().event_type,
+            ReminderResponseEvent.EventType.EXPIRED,
+        )
