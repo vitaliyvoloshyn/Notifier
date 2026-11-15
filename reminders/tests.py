@@ -362,3 +362,77 @@ class ReminderResponseActionTests(TestCase):
             self.response.events.get().event_type,
             ReminderResponseEvent.EventType.EXPIRED,
         )
+
+
+class ReminderManagementTests(TestCase):
+    def setUp(self):
+        self.author = TelegramUser.objects.create_user(telegram_id=8001, username="manage_author")
+        self.controller = TelegramUser.objects.create_user(telegram_id=8002, username="manage_controller")
+        self.assignee = TelegramUser.objects.create_user(telegram_id=8003, username="manage_assignee")
+        self.outsider = TelegramUser.objects.create_user(telegram_id=8004, username="manage_outsider")
+        self.reminder = Reminder.objects.create(
+            title="Кероване нагадування",
+            author=self.author,
+            first_reminder_at=timezone.now() + timedelta(hours=2),
+            next_reminder_at=timezone.now() + timedelta(hours=2),
+            timezone="Europe/Kyiv",
+        )
+        ReminderParticipant.objects.create(
+            reminder=self.reminder, user=self.controller,
+            role=ReminderParticipant.Role.CONTROLLER, added_by=self.author,
+        )
+        ReminderParticipant.objects.create(
+            reminder=self.reminder, user=self.assignee,
+            role=ReminderParticipant.Role.ASSIGNEE, added_by=self.author,
+        )
+
+    def test_controller_can_list_view_pause_resume_rename_and_delete(self):
+        from .controls import (
+            list_reminders, get_reminder_detail, set_reminder_active,
+            rename_reminder, delete_reminder,
+        )
+
+        self.assertEqual([item["id"] for item in list_reminders(self.controller.telegram_id, "controlled")], [self.reminder.pk])
+        self.assertTrue(get_reminder_detail(self.reminder.pk, self.controller.telegram_id)["is_controller"])
+        self.assertTrue(set_reminder_active(self.reminder.pk, self.controller.telegram_id, False))
+        self.reminder.refresh_from_db()
+        self.assertFalse(self.reminder.is_active)
+        self.assertTrue(set_reminder_active(self.reminder.pk, self.controller.telegram_id, True))
+        self.assertTrue(rename_reminder(self.reminder.pk, self.controller.telegram_id, "Нова назва"))
+        self.reminder.refresh_from_db()
+        self.assertEqual(self.reminder.title, "Нова назва")
+        self.assertTrue(delete_reminder(self.reminder.pk, self.controller.telegram_id))
+        self.assertFalse(Reminder.objects.filter(pk=self.reminder.pk).exists())
+
+    def test_assignee_can_view_but_cannot_manage(self):
+        from .controls import get_reminder_detail, set_reminder_active, rename_reminder, delete_reminder
+
+        detail = get_reminder_detail(self.reminder.pk, self.assignee.telegram_id)
+        self.assertIsNotNone(detail)
+        self.assertFalse(detail["is_controller"])
+        self.assertFalse(set_reminder_active(self.reminder.pk, self.assignee.telegram_id, False))
+        self.assertFalse(rename_reminder(self.reminder.pk, self.assignee.telegram_id, "Чужа назва"))
+        self.assertFalse(delete_reminder(self.reminder.pk, self.assignee.telegram_id))
+
+    def test_unrelated_user_cannot_view_or_manage(self):
+        from .controls import get_reminder_detail, set_reminder_active, delete_reminder
+
+        self.assertIsNone(get_reminder_detail(self.reminder.pk, self.outsider.telegram_id))
+        self.assertFalse(set_reminder_active(self.reminder.pk, self.outsider.telegram_id, False))
+        self.assertFalse(delete_reminder(self.reminder.pk, self.outsider.telegram_id))
+
+    def test_completed_one_time_reminder_cannot_be_resumed(self):
+        from .controls import set_reminder_active
+
+        self.reminder.next_reminder_at = None
+        self.reminder.save(update_fields=["next_reminder_at"])
+        self.reminder.is_active = False
+        self.reminder.save(update_fields=["is_active"])
+        self.assertFalse(set_reminder_active(self.reminder.pk, self.author.telegram_id, True))
+
+    def test_assigned_list_does_not_include_unrelated_reminders(self):
+        from .controls import list_reminders
+
+        items = list_reminders(self.assignee.telegram_id, "assigned")
+        self.assertEqual([item["id"] for item in items], [self.reminder.pk])
+        self.assertEqual(list_reminders(self.outsider.telegram_id, "assigned"), [])
