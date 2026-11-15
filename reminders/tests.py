@@ -321,6 +321,35 @@ class ReminderResponseActionTests(TestCase):
         self.assertEqual(response.delivery_status, ReminderResponse.DeliveryStatus.PENDING)
         self.assertIsNone(response.deferred_until)
 
+    def test_custom_defer_uses_exact_aware_datetime(self):
+        from .responses import apply_response_action
+
+        target = timezone.now() + timedelta(hours=3, minutes=17)
+        response, event = apply_response_action(
+            response_id=self.response.pk,
+            actor_telegram_id=self.assignee.telegram_id,
+            action="defer",
+            defer_until=target,
+            telegram_message_id=777,
+        )
+        self.assertEqual(response.deferred_until, target)
+        self.assertEqual(event.deferred_until, target)
+        self.assertEqual(event.details, {"mode": "custom"})
+        self.assertIsNone(response.deadline_at)
+
+    def test_custom_defer_rejects_naive_datetime(self):
+        from datetime import datetime
+        from reminders.responses import ResponseActionError, apply_response_action
+
+        with self.assertRaises(ResponseActionError):
+            apply_response_action(
+                response_id=self.response.pk,
+                actor_telegram_id=self.assignee.telegram_id,
+                action="defer",
+                defer_until=datetime(2026, 11, 16, 10, 0),
+                telegram_message_id=777,
+            )
+
     def test_expired_response_is_marked_and_logged(self):
         from .responses import expire_due_responses
 

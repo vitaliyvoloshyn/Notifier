@@ -13,9 +13,11 @@ class StartHandlerTest(TestCase):
         message.from_user.first_name = "Іван"
         message.from_user.last_name = "Франко"
         message.answer = AsyncMock()
+        state = MagicMock()
+        state.clear = AsyncMock()
 
         # Перший виклик /start (реєстрація)
-        await cmd_start(message)
+        await cmd_start(message, state)
 
         self.assertEqual(await TelegramUser.objects.acount(), 1)
         user = await TelegramUser.objects.aget(telegram_id=123456789)
@@ -23,7 +25,7 @@ class StartHandlerTest(TestCase):
         self.assertFalse(user.has_usable_password())
 
         # Другий виклик /start (повернення)
-        await cmd_start(message)
+        await cmd_start(message, state)
 
         # Перевіряємо, що дублікат не створився
         self.assertEqual(await TelegramUser.objects.acount(), 1)

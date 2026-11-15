@@ -11,7 +11,7 @@ def response_keyboard(response_id: int) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="⏰ +30 хв", callback_data=f"rem:{response_id}:defer30"),
-            InlineKeyboardButton(text="🕒 Інший час", callback_data=f"rem:{response_id}:choose"),
+            InlineKeyboardButton(text="🕒 Інший час", callback_data=f"rem:{response_id}:custom"),
         ],
     ])
 

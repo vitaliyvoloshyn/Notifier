@@ -3,6 +3,7 @@ import logging
 from django.core.management.base import BaseCommand
 from django.conf import settings
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 from bot.handlers import router
 
 
@@ -17,7 +18,7 @@ class Command(BaseCommand):
     async def start_bot(self):
         # Токен варто зберігати у settings.py (через змінні оточення .env)
         bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-        dp = Dispatcher()
+        dp = Dispatcher(storage=MemoryStorage())
 
         # Підключаємо роутер з обробниками
         dp.include_router(router)

@@ -14,7 +14,7 @@ class ResponseActionError(Exception):
 
 def apply_response_action(
     *, response_id: int, actor_telegram_id: int, action: str, defer_minutes: int | None = None,
-    telegram_message_id: int | None = None,
+    defer_until=None, telegram_message_id: int | None = None,
 ):
     """Застосовує дію лише від призначеного виконавця; зміна атомарна."""
     with transaction.atomic():
@@ -54,9 +54,19 @@ def apply_response_action(
             return response, event
 
         if action == "defer":
-            if not isinstance(defer_minutes, int) or isinstance(defer_minutes, bool) or not 1 <= defer_minutes <= 10080:
-                raise ResponseActionError("Некоректний інтервал відтермінування.")
-            deferred_until = now + timedelta(minutes=defer_minutes)
+            if defer_until is not None:
+                if timezone.is_naive(defer_until):
+                    raise ResponseActionError("Час відтермінування має містити часовий пояс.")
+                deferred_until = defer_until
+                seconds = (deferred_until - now).total_seconds()
+                if seconds <= 0 or seconds > 7 * 24 * 60 * 60:
+                    raise ResponseActionError("Час відтермінування має бути в межах наступних 7 днів.")
+                details = {"mode": "custom"}
+            else:
+                if not isinstance(defer_minutes, int) or isinstance(defer_minutes, bool) or not 1 <= defer_minutes <= 10080:
+                    raise ResponseActionError("Некоректний інтервал відтермінування.")
+                deferred_until = now + timedelta(minutes=defer_minutes)
+                details = {"minutes": defer_minutes}
             response.deferred_until = deferred_until
             response.deadline_at = None
             response.save(update_fields=["deferred_until", "deadline_at"])
@@ -65,7 +75,7 @@ def apply_response_action(
                 event_type=ReminderResponseEvent.EventType.DEFERRED,
                 actor=response.assignee,
                 deferred_until=deferred_until,
-                details={"minutes": defer_minutes},
+                details=details,
             )
             return response, event
 
