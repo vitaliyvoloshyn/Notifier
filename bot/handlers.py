@@ -20,7 +20,7 @@ from bot.keyboards import (
     reminders_menu_keyboard,
     reminders_list_keyboard,
     reminder_detail_keyboard,
-    delete_confirmation_keyboard,
+    delete_confirmation_keyboard, main_reply_keyboard,
 )
 from reminders.models import Reminder, ReminderResponse
 from reminders.controls import (
@@ -91,7 +91,8 @@ def _resolve_users(raw: str) -> tuple[list[TelegramUser], list[str]]:
     tokens = [part.strip().lstrip("@") for part in raw.replace(";", ",").split(",") if part.strip()]
     users, missing = [], []
     for token in tokens:
-        query = TelegramUser.objects.filter(telegram_id=int(token)) if token.isdigit() else TelegramUser.objects.filter(username__iexact=token)
+        query = TelegramUser.objects.filter(telegram_id=int(token)) if token.isdigit() else TelegramUser.objects.filter(
+            username__iexact=token)
         user = query.first()
         if user is None or not user.is_active:
             missing.append(token)
@@ -113,6 +114,8 @@ def _get_response_for_custom_defer(response_id: int, telegram_id: int):
     )
 
 
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -127,16 +130,18 @@ async def cmd_start(message: Message, state: FSMContext):
         user.set_unusable_password()
         await user.asave(update_fields=["password"])
         await message.answer(
-            f"Привіт, {greeting_name}! Ви зареєстровані.\n"
-            "Створити нагадування: /new_reminder\n"
-            "Керування нагадуваннями: /reminders\n"
-            "Налаштувати часовий пояс: /timezone Europe/Kyiv"
+            f"Привіт, {greeting_name}! Ви зареєстровані.\n",
+            # "Створити нагадування: /new_reminder\n"
+            # "Керування нагадуваннями: /reminders\n"
+            # "Налаштувати часовий пояс: /timezone Europe/Kyiv"
+            reply_markup=main_reply_keyboard(),
         )
     else:
         await message.answer(
-            f"З поверненням, {greeting_name}!\n"
-            "Створити нагадування: /new_reminder\n"
-            "Керування нагадуваннями: /reminders"
+            f"З поверненням, {greeting_name}!\n",
+            # "Створити нагадування: /new_reminder\n"
+            # "Керування нагадуваннями: /reminders"
+            reply_markup=main_reply_keyboard(),
         )
 
 
@@ -176,6 +181,8 @@ async def show_reminders_menu(message: Message, state: FSMContext):
         await message.answer("Спочатку виконайте /start.")
         return
     await message.answer("Меню керування нагадуваннями:", reply_markup=reminders_menu_keyboard())
+
+
 
 
 @router.callback_query(F.data.startswith("mgr:"))
@@ -224,10 +231,12 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
             pages = max(1, (len(items) + 4) // 5)
             page = min(page, pages - 1)
             await state.update_data(reminder_list_page=page)
-            lines = [f"Список ({'я контролюю' if mode == 'controlled' else 'призначені мені'}), сторінка {page + 1}/{pages}:"]
+            lines = [
+                f"Список ({'я контролюю' if mode == 'controlled' else 'призначені мені'}), сторінка {page + 1}/{pages}:"]
             for item in items[page * 5:(page + 1) * 5]:
                 when = item["next_reminder_at"]
-                when_text = when.astimezone(ZoneInfo(item["timezone"])).strftime("%d.%m.%Y %H:%M") if when else "не заплановано"
+                when_text = when.astimezone(ZoneInfo(item["timezone"])).strftime(
+                    "%d.%m.%Y %H:%M") if when else "не заплановано"
                 lines.append(f"{'🟢' if item['is_active'] else '⏸'} {item['title']} — {when_text}")
             text = "\n".join(lines)
             markup = reminders_list_keyboard(items, mode, page)
@@ -270,7 +279,8 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
                     lines.append(f"• {'Контролер' if role == 'controller' else 'Виконавець'}: {name}")
         await callback.message.edit_text(
             "\n".join(lines),
-            reply_markup=reminder_detail_keyboard(reminder_id, can_manage=detail["is_controller"], is_active=detail["is_active"]),
+            reply_markup=reminder_detail_keyboard(reminder_id, can_manage=detail["is_controller"],
+                                                  is_active=detail["is_active"]),
         )
         await callback.answer()
         return
@@ -284,7 +294,8 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
         active = action == "resume"
         ok = await sync_to_async(set_reminder_active, thread_sensitive=True)(reminder_id, telegram_id, active)
         if not ok:
-            await callback.answer("Не вдалося змінити стан: немає доступу або нагадування вже завершене.", show_alert=True)
+            await callback.answer("Не вдалося змінити стан: немає доступу або нагадування вже завершене.",
+                                  show_alert=True)
             return
         detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(reminder_id, telegram_id)
         await callback.message.edit_reply_markup(
@@ -337,7 +348,8 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
         if not ok:
             await callback.answer("Немає прав або нагадування вже видалене.", show_alert=True)
             return
-        await callback.message.edit_text("🗑 Нагадування та його історію видалено.", reply_markup=reminders_menu_keyboard())
+        await callback.message.edit_text("🗑 Нагадування та його історію видалено.",
+                                         reply_markup=reminders_menu_keyboard())
         await callback.answer("Видалено.")
         return
 
@@ -353,7 +365,8 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
             return
         await callback.message.edit_text(
             f"📌 {detail['title']}\nСтан: {'активне' if detail['is_active'] else 'призупинене'}",
-            reply_markup=reminder_detail_keyboard(reminder_id, can_manage=detail['is_controller'], is_active=detail['is_active']),
+            reply_markup=reminder_detail_keyboard(reminder_id, can_manage=detail['is_controller'],
+                                                  is_active=detail['is_active']),
         )
         await callback.answer("Видалення скасовано.")
         return
@@ -368,9 +381,11 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
         lines = [f"Список ({'я контролюю' if mode == 'controlled' else 'призначені мені'}):"]
         for item in items[page * 5:(page + 1) * 5]:
             when = item["next_reminder_at"]
-            when_text = when.astimezone(ZoneInfo(item["timezone"])).strftime("%d.%m.%Y %H:%M") if when else "не заплановано"
+            when_text = when.astimezone(ZoneInfo(item["timezone"])).strftime(
+                "%d.%m.%Y %H:%M") if when else "не заплановано"
             lines.append(f"{'🟢' if item['is_active'] else '⏸'} {item['title']} — {when_text}")
-        await callback.message.edit_text("\n".join(lines) if items else "У цьому розділі поки немає нагадувань.", reply_markup=reminders_list_keyboard(items, mode, page))
+        await callback.message.edit_text("\n".join(lines) if items else "У цьому розділі поки немає нагадувань.",
+                                         reply_markup=reminders_list_keyboard(items, mode, page))
         await callback.answer()
         return
 
@@ -450,7 +465,8 @@ async def creation_recurrence(message: Message, state: FSMContext):
     await state.update_data(recurrence_type=recurrence)
     if recurrence == Reminder.RecurrenceType.NONE:
         await state.set_state(ReminderCreation.assignees)
-        await message.answer("Кому призначити нагадування? Вкажіть @username або Telegram ID через кому. Для особистого — «пропустити».")
+        await message.answer(
+            "Кому призначити нагадування? Вкажіть @username або Telegram ID через кому. Для особистого — «пропустити».")
     else:
         await state.set_state(ReminderCreation.interval)
         await message.answer("Кожен який інтервал? Введіть ціле число: 1 — кожен період, 2 — через один, тощо.")
@@ -467,7 +483,8 @@ async def creation_interval(message: Message, state: FSMContext):
         return
     await state.update_data(recurrence_interval=interval)
     await state.set_state(ReminderCreation.assignees)
-    await message.answer("Кому призначити нагадування? Вкажіть @username або Telegram ID через кому. Для особистого — «пропустити».")
+    await message.answer(
+        "Кому призначити нагадування? Вкажіть @username або Telegram ID через кому. Для особистого — «пропустити».")
 
 
 @router.message(ReminderCreation.assignees)
@@ -484,7 +501,8 @@ async def creation_assignees(message: Message, state: FSMContext):
             return
     await state.update_data(assignee_ids=[user.pk for user in assignees])
     await state.set_state(ReminderCreation.controllers)
-    await message.answer("Додати інших контролерів? Вкажіть @username або Telegram ID через кому. Якщо ні — «пропустити».")
+    await message.answer(
+        "Додати інших контролерів? Вкажіть @username або Telegram ID через кому. Якщо ні — «пропустити».")
 
 
 @router.message(ReminderCreation.controllers)
@@ -501,7 +519,8 @@ async def creation_controllers(message: Message, state: FSMContext):
             return
     data = await state.get_data()
     author = await TelegramUser.objects.aget(pk=data["author_id"])
-    assignees = await sync_to_async(lambda: list(TelegramUser.objects.filter(pk__in=data["assignee_ids"])), thread_sensitive=True)()
+    assignees = await sync_to_async(lambda: list(TelegramUser.objects.filter(pk__in=data["assignee_ids"])),
+                                    thread_sensitive=True)()
     try:
         reminder = await sync_to_async(create_reminder, thread_sensitive=True)(
             author=author,
@@ -526,7 +545,8 @@ async def creation_controllers(message: Message, state: FSMContext):
         f"«{reminder.title}»\n"
         f"Перше спрацювання: {local_at:%d.%m.%Y %H:%M} ({reminder.timezone})\n"
         f"Повторення: {recurrence_label}"
-        + (f", інтервал {reminder.recurrence_interval}" if reminder.recurrence_type != Reminder.RecurrenceType.NONE else "")
+        + (
+            f", інтервал {reminder.recurrence_interval}" if reminder.recurrence_type != Reminder.RecurrenceType.NONE else "")
         + f"\nВиконавців: {len(assignees) if assignees else 1}."
     )
 
@@ -545,7 +565,8 @@ async def reminder_response_callback(callback: CallbackQuery, state: FSMContext)
         return
 
     if command == "custom":
-        response = await sync_to_async(_get_response_for_custom_defer, thread_sensitive=True)(response_id, callback.from_user.id)
+        response = await sync_to_async(_get_response_for_custom_defer, thread_sensitive=True)(response_id,
+                                                                                              callback.from_user.id)
         if response is None:
             await callback.answer("Це нагадування не належить вам або вже неактуальне.", show_alert=True)
             return
@@ -623,7 +644,8 @@ async def custom_defer_datetime(message: Message, state: FSMContext):
     await state.clear()
 
 
-async def _apply_and_notify(event, response_id: int, action: str, minutes: int | None, defer_until, telegram_message_id=None):
+async def _apply_and_notify(event, response_id: int, action: str, minutes: int | None, defer_until,
+                            telegram_message_id=None):
     actor_id = event.from_user.id
     source_message_id = telegram_message_id
     if source_message_id is None and isinstance(event, CallbackQuery) and event.message:
@@ -664,8 +686,8 @@ async def _apply_and_notify(event, response_id: int, action: str, minutes: int |
 
     reminder = response.occurrence.reminder
     should_notify = (
-        reminder.notification_policy == Reminder.NotificationPolicy.ALL_ACTIONS
-        or action == "rejected"
+            reminder.notification_policy == Reminder.NotificationPolicy.ALL_ACTIONS
+            or action == "rejected"
     )
     if should_notify:
         controller_ids = await sync_to_async(get_controller_telegram_ids, thread_sensitive=True)(reminder.pk)

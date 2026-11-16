@@ -1,6 +1,6 @@
 """Клавіатури для дій із Telegram-нагадуваннями."""
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
 
 def response_keyboard(response_id: int) -> InlineKeyboardMarkup:
@@ -72,3 +72,16 @@ def delete_confirmation_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Так, видалити", callback_data=f"mgr:delete:{reminder_id}")],
         [InlineKeyboardButton(text="Ні, залишити", callback_data=f"mgr:cancel_delete:{reminder_id}")],
     ])
+
+def main_reply_keyboard() -> ReplyKeyboardMarkup:
+  return ReplyKeyboardMarkup(
+      keyboard=[
+          [
+              KeyboardButton(text="🛠 Я контролюю"),
+              KeyboardButton(text="📥 Призначені мені"),
+          ],
+          [KeyboardButton(text="➕ Створити нагадування")],
+      ],
+      resize_keyboard=True,
+      input_field_placeholder="Оберіть дію...",
+  )
