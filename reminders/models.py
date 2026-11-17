@@ -77,7 +77,7 @@ class Reminder(models.Model):
         verbose_name = "Нагадування"
         verbose_name_plural = "Нагадування"
         ordering = ("next_reminder_at", "-created_at")
-        constraints = [
+        constraints = (
             models.CheckConstraint(
                 condition=Q(recurrence_interval__gte=1),
                 name="reminder_recurrence_interval_gte_1",
@@ -86,7 +86,7 @@ class Reminder(models.Model):
                 condition=Q(response_timeout_minutes__gte=1),
                 name="reminder_response_timeout_gte_1",
             ),
-        ]
+        )
 
     def __str__(self):
         return self.title
@@ -130,13 +130,15 @@ class ReminderParticipant(models.Model):
         verbose_name = "Учасник нагадування"
         verbose_name_plural = "Учасники нагадування"
         ordering = ("role", "added_at")
-        constraints = [
+        constraints = (
             models.UniqueConstraint(
                 fields=("reminder", "user", "role"),
                 name="unique_reminder_user_role",
             ),
-        ]
-        indexes = [models.Index(fields=("user", "role"), name="rem_part_user_role_idx")]
+        )
+        indexes = (
+            models.Index(fields=("user", "role"), name="rem_part_user_role_idx"),
+        )
 
     def __str__(self):
         return f"{self.user} — {self.get_role_display()}: {self.reminder}"
@@ -163,7 +165,9 @@ class ReminderOccurrence(models.Model):
         "Статус", max_length=12, choices=Status.choices, default=Status.SCHEDULED
     )
     created_at = models.DateTimeField("Створено", auto_now_add=True)
-    processing_started_at = models.DateTimeField("Початок обробки", null=True, blank=True)
+    processing_started_at = models.DateTimeField(
+        "Початок обробки", null=True, blank=True
+    )
     completed_at = models.DateTimeField("Завершено", null=True, blank=True)
     error_message = models.TextField("Помилка", blank=True)
 
@@ -171,13 +175,17 @@ class ReminderOccurrence(models.Model):
         verbose_name = "Спрацювання нагадування"
         verbose_name_plural = "Спрацювання нагадувань"
         ordering = ("-scheduled_at",)
-        constraints = [
+        constraints = (
             models.UniqueConstraint(
                 fields=("reminder", "scheduled_at"),
                 name="unique_reminder_occurrence_time",
             ),
-        ]
-        indexes = [models.Index(fields=("status", "scheduled_at"), name="rem_occ_status_sched_idx")]
+        )
+        indexes = (
+            models.Index(
+                fields=("status", "scheduled_at"), name="rem_occ_status_sched_idx"
+            ),
+        )
 
     def __str__(self):
         return f"{self.reminder} — {self.scheduled_at:%Y-%m-%d %H:%M}"
@@ -223,27 +231,42 @@ class ReminderResponse(models.Model):
         default=DeliveryStatus.PENDING,
     )
     created_at = models.DateTimeField("Створено", auto_now_add=True)
-    last_sent_at = models.DateTimeField("Остання успішна відправка", null=True, blank=True)
-    deadline_at = models.DateTimeField("Крайній час відповіді", null=True, blank=True, db_index=True)
-    deferred_until = models.DateTimeField("Відтерміновано до", null=True, blank=True, db_index=True)
-    responded_at = models.DateTimeField("Час остаточної відповіді", null=True, blank=True)
-    telegram_message_id = models.BigIntegerField("ID повідомлення Telegram", null=True, blank=True)
+    last_sent_at = models.DateTimeField(
+        "Остання успішна відправка", null=True, blank=True
+    )
+    deadline_at = models.DateTimeField(
+        "Крайній час відповіді", null=True, blank=True, db_index=True
+    )
+    deferred_until = models.DateTimeField(
+        "Відтерміновано до", null=True, blank=True, db_index=True
+    )
+    responded_at = models.DateTimeField(
+        "Час остаточної відповіді", null=True, blank=True
+    )
+    telegram_message_id = models.BigIntegerField(
+        "ID повідомлення Telegram", null=True, blank=True
+    )
     delivery_error = models.TextField("Помилка доставки", blank=True)
 
     class Meta:
         verbose_name = "Відповідь на нагадування"
         verbose_name_plural = "Відповіді на нагадування"
         ordering = ("-created_at",)
-        constraints = [
+        constraints = (
             models.UniqueConstraint(
                 fields=("occurrence", "assignee"),
                 name="unique_occurrence_assignee_response",
             ),
-        ]
-        indexes = [
-            models.Index(fields=("status", "deadline_at"), name="rem_resp_status_deadline_idx"),
-            models.Index(fields=("delivery_status", "deferred_until"), name="rem_resp_delivery_defer_idx"),
-        ]
+        )
+        indexes = (
+            models.Index(
+                fields=("status", "deadline_at"), name="rem_resp_status_deadline_idx"
+            ),
+            models.Index(
+                fields=("delivery_status", "deferred_until"),
+                name="rem_resp_delivery_defer_idx",
+            ),
+        )
 
     def __str__(self):
         return f"{self.assignee} — {self.occurrence} — {self.get_status_display()}"
@@ -284,7 +307,11 @@ class ReminderResponseEvent(models.Model):
         verbose_name = "Подія відповіді"
         verbose_name_plural = "Історія відповідей"
         ordering = ("occurred_at", "pk")
-        indexes = [models.Index(fields=("event_type", "occurred_at"), name="rem_evt_type_time_idx")]
+        indexes = (
+            models.Index(
+                fields=("event_type", "occurred_at"), name="rem_evt_type_time_idx"
+            ),
+        )
 
     def __str__(self):
         return f"{self.get_event_type_display()} — {self.response}"
