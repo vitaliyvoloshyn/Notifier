@@ -267,7 +267,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     try:
         parts = callback.data.split(":")
         action = parts[1]
-    except (AttributeError, IndexError):
+    except AttributeError, IndexError:
         await callback.answer("Некоректна команда.", show_alert=True)
         return
 
@@ -299,7 +299,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action == "list":
         try:
             mode, page = parts[2], max(0, int(parts[3]))
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректний список.", show_alert=True)
             return
         if mode not in {"controlled", "assigned"}:
@@ -317,7 +317,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action == "view":
         try:
             reminder_id, mode = int(parts[2]), parts[3]
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
         detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
@@ -371,7 +371,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action in {"pause", "resume"}:
         try:
             reminder_id = int(parts[2])
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
         active = action == "resume"
@@ -400,7 +400,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action == "rename":
         try:
             reminder_id = int(parts[2])
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
         detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
@@ -422,7 +422,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action == "delete_confirm":
         try:
             reminder_id = int(parts[2])
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
         detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
@@ -441,7 +441,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action == "delete":
         try:
             reminder_id = int(parts[2])
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
         ok = await sync_to_async(delete_reminder, thread_sensitive=True)(
@@ -462,7 +462,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
     if action == "cancel_delete":
         try:
             reminder_id = int(parts[2])
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
         detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
@@ -507,7 +507,7 @@ async def rename_reminder_title(message: Message, state: FSMContext):
     except ValueError as exc:
         await message.answer(str(exc), reply_markup=cancel_keyboard())
         return
-    await state.clear()
+    await state.set_state(None)
     if ok:
         await message.answer("✅ Назву нагадування змінено.")
     else:
@@ -642,10 +642,28 @@ async def _proceed_to_controllers(
     target: Message, state: FSMContext, assignee_ids: list[int]
 ):
     await state.update_data(assignee_ids=assignee_ids)
+    data = await state.get_data()
+    author_id = data.get("author_id")
+
+    # Перевіряємо, чи є серед виконавців хтось, окрім автора
+    has_other_assignees = any(uid != author_id for uid in assignee_ids)
+
+    if has_other_assignees:
+        text = (
+            "Ви автоматично стаєте контролером у цьому нагадуванні.\n"
+            "Додати інших контролерів? Вкажіть @username або Telegram ID через кому.\n"
+            "Якщо ні — натисніть Пропустити."
+        )
+    else:
+        text = (
+            "Оскільки це персональне нагадування, ви не додані до контролерів автоматично (щоб не отримувати зайвих звітів).\n"
+            "Якщо все ж бажаєте додати контролерів (зокрема себе) — вкажіть @username або Telegram ID через кому.\n"
+            "Якщо ні — натисніть Пропустити."
+        )
+
     await state.set_state(ReminderCreation.controllers)
     await target.answer(
-        "Додати інших контролерів? Вкажіть @username або Telegram ID через кому.\n"
-        "Якщо ні — натисніть Пропустити.",
+        text,
         reply_markup=skip_keyboard(),
     )
 
@@ -752,7 +770,7 @@ async def reminder_response_callback(callback: CallbackQuery, state: FSMContext)
     try:
         _, raw_id, command = callback.data.split(":", 2)
         response_id = int(raw_id)
-    except (AttributeError, TypeError, ValueError):
+    except AttributeError, TypeError, ValueError:
         await callback.answer("Некоректна команда.", show_alert=True)
         return
     if callback.message is None:
@@ -845,7 +863,7 @@ async def custom_defer_datetime(message: Message, state: FSMContext):
             return
         response_id = data["custom_response_id"]
         source_message_id = data["source_message_id"]
-    except (ValueError, KeyError, ZoneInfoNotFoundError):
+    except ValueError, KeyError, ZoneInfoNotFoundError:
         await message.answer(
             "Не вдалося розпізнати дату. Формат: ДД.ММ.РРРР ГГ:ХХ.",
             reply_markup=cancel_keyboard(),

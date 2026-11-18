@@ -1,8 +1,8 @@
 """Сервіси створення нагадувань і календарного розрахунку повторень."""
 
 from calendar import monthrange
+from collections.abc import Iterable
 from datetime import datetime, time, timedelta
-from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.core.exceptions import ValidationError
@@ -22,10 +22,14 @@ def get_zone(timezone_name: str) -> ZoneInfo:
     try:
         return ZoneInfo(timezone_name)
     except (ZoneInfoNotFoundError, TypeError, ValueError) as exc:
-        raise ValidationError({"timezone": "Вкажіть коректний IANA часовий пояс."}) from exc
+        raise ValidationError(
+            {"timezone": "Вкажіть коректний IANA часовий пояс."}
+        ) from exc
 
 
-def _localize_wall_time(value: datetime, zone: ZoneInfo, *, shift_nonexistent: bool) -> datetime:
+def _localize_wall_time(
+    value: datetime, zone: ZoneInfo, *, shift_nonexistent: bool
+) -> datetime:
     """Перетворює локальний naive datetime на aware datetime.
 
     Для неоднозначного часу під час осіннього переходу обирається перше
@@ -34,24 +38,29 @@ def _localize_wall_time(value: datetime, zone: ZoneInfo, *, shift_nonexistent: b
     пересунути час уперед до першої існуючої хвилини.
     """
     candidate = value.replace(tzinfo=zone, fold=0)
-    round_trip = candidate.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
+    round_trip = (
+        candidate.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
+    )
     if round_trip == value:
         return candidate
 
     if not shift_nonexistent:
         raise ValidationError(
-            "Цей локальний час не існує через перехід на літній час. "
-            "Оберіть інший час."
+            "Цей локальний час не існує через перехід на літній час. Оберіть інший час."
         )
 
     shifted = value
     for _ in range(181):
         shifted += timedelta(minutes=1)
         candidate = shifted.replace(tzinfo=zone, fold=0)
-        round_trip = candidate.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
+        round_trip = (
+            candidate.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
+        )
         if round_trip == shifted:
             return candidate
-    raise ValidationError("Не вдалося визначити коректний локальний час для повторення.")
+    raise ValidationError(
+        "Не вдалося визначити коректний локальний час для повторення."
+    )
 
 
 def normalize_first_datetime(value: datetime, timezone_name: str) -> datetime:
@@ -61,10 +70,14 @@ def normalize_first_datetime(value: datetime, timezone_name: str) -> datetime:
     zone = get_zone(timezone_name)
     if django_timezone.is_aware(value):
         return value.astimezone(ZoneInfo("UTC"))
-    return _localize_wall_time(value, zone, shift_nonexistent=False).astimezone(ZoneInfo("UTC"))
+    return _localize_wall_time(value, zone, shift_nonexistent=False).astimezone(
+        ZoneInfo("UTC")
+    )
 
 
-def _add_months(year: int, month: int, months: int, day: int, wall_time: time) -> datetime:
+def _add_months(
+    year: int, month: int, months: int, day: int, wall_time: time
+) -> datetime:
     month_index = year * 12 + (month - 1) + months
     target_year, zero_based_month = divmod(month_index, 12)
     target_month = zero_based_month + 1
@@ -75,7 +88,9 @@ def _add_months(year: int, month: int, months: int, day: int, wall_time: time) -
     )
 
 
-def calculate_next_occurrence(reminder: Reminder, after: datetime | None = None) -> datetime | None:
+def calculate_next_occurrence(
+    reminder: Reminder, after: datetime | None = None
+) -> datetime | None:
     """Обчислює наступне спрацювання з локальним календарним кроком.
 
     Якщо `after` не задано, перше спрацювання використовується як база,
@@ -107,23 +122,36 @@ def calculate_next_occurrence(reminder: Reminder, after: datetime | None = None)
     if reminder.recurrence_type == Reminder.RecurrenceType.DAILY:
         elapsed = (after_date - anchor_date).days
         periods = max(1, elapsed // interval + 1)
-        target = datetime.combine(anchor_date + timedelta(days=periods * interval), anchor_wall_time)
+        target = datetime.combine(
+            anchor_date + timedelta(days=periods * interval), anchor_wall_time
+        )
     elif reminder.recurrence_type == Reminder.RecurrenceType.WEEKLY:
         elapsed = (after_date - anchor_date).days
         periods = max(1, elapsed // (7 * interval) + 1)
-        target = datetime.combine(anchor_date + timedelta(days=periods * 7 * interval), anchor_wall_time)
+        target = datetime.combine(
+            anchor_date + timedelta(days=periods * 7 * interval), anchor_wall_time
+        )
     elif reminder.recurrence_type == Reminder.RecurrenceType.MONTHLY:
-        month_delta = (after_local.year - anchor_local.year) * 12 + after_local.month - anchor_local.month
+        month_delta = (
+            (after_local.year - anchor_local.year) * 12
+            + after_local.month
+            - anchor_local.month
+        )
         periods = max(1, month_delta // interval + 1)
         target = _add_months(
-            anchor_local.year, anchor_local.month, periods * interval,
-            anchor_local.day, anchor_wall_time,
+            anchor_local.year,
+            anchor_local.month,
+            periods * interval,
+            anchor_local.day,
+            anchor_wall_time,
         )
     elif reminder.recurrence_type == Reminder.RecurrenceType.YEARLY:
         year_delta = after_local.year - anchor_local.year
         periods = max(1, year_delta // interval + 1)
         target_year = anchor_local.year + periods * interval
-        target_day = min(anchor_local.day, monthrange(target_year, anchor_local.month)[1])
+        target_day = min(
+            anchor_local.day, monthrange(target_year, anchor_local.month)[1]
+        )
         target = datetime.combine(
             datetime(target_year, anchor_local.month, target_day).date(),
             anchor_wall_time,
@@ -131,7 +159,9 @@ def calculate_next_occurrence(reminder: Reminder, after: datetime | None = None)
     else:
         raise ValidationError({"recurrence_type": "Невідомий тип повторення."})
 
-    return _localize_wall_time(target, zone, shift_nonexistent=True).astimezone(ZoneInfo("UTC"))
+    return _localize_wall_time(target, zone, shift_nonexistent=True).astimezone(
+        ZoneInfo("UTC")
+    )
 
 
 @transaction.atomic
@@ -151,7 +181,6 @@ def create_reminder(
     """Створює правило, перше спрацювання, учасників і персональні відповіді.
 
     `assignees` та `controllers` — ітеровані набори об'єктів TelegramUser.
-    Автор автоматично є контролером і не дублюється в учасниках.
     Якщо виконавців немає, відповідь створюється для автора.
     """
     clean_title = (title or "").strip()
@@ -161,14 +190,32 @@ def create_reminder(
         raise ValidationError({"title": "Назва має містити не більше 255 символів."})
     if recurrence_type not in Reminder.RecurrenceType.values:
         raise ValidationError({"recurrence_type": "Невідомий тип повторення."})
-    if not isinstance(recurrence_interval, int) or isinstance(recurrence_interval, bool) or recurrence_interval < 1:
-        raise ValidationError({"recurrence_interval": "Інтервал має бути цілим числом від 1."})
-    if not isinstance(response_timeout_minutes, int) or isinstance(response_timeout_minutes, bool) or response_timeout_minutes < 1:
-        raise ValidationError({"response_timeout_minutes": "Час очікування має бути цілим числом від 1 хвилини."})
+    if (
+        not isinstance(recurrence_interval, int)
+        or isinstance(recurrence_interval, bool)
+        or recurrence_interval < 1
+    ):
+        raise ValidationError(
+            {"recurrence_interval": "Інтервал має бути цілим числом від 1."}
+        )
+    if (
+        not isinstance(response_timeout_minutes, int)
+        or isinstance(response_timeout_minutes, bool)
+        or response_timeout_minutes < 1
+    ):
+        raise ValidationError(
+            {
+                "response_timeout_minutes": "Час очікування має бути цілим числом від 1 хвилини."
+            }
+        )
     if notification_policy not in Reminder.NotificationPolicy.values:
-        raise ValidationError({"notification_policy": "Невідома політика інформування."})
+        raise ValidationError(
+            {"notification_policy": "Невідома політика інформування."}
+        )
 
-    selected_timezone = timezone_name or getattr(author, "timezone", "Europe/Kyiv") or "Europe/Kyiv"
+    selected_timezone = (
+        timezone_name or getattr(author, "timezone", "Europe/Kyiv") or "Europe/Kyiv"
+    )
     get_zone(selected_timezone)
     first_at = normalize_first_datetime(first_reminder_at, selected_timezone)
 
@@ -185,15 +232,30 @@ def create_reminder(
     )
 
     assignee_map = {user.pk: user for user in assignees}
-    controller_map = {user.pk: user for user in controllers if user.pk != author.pk}
+
+    # Перевіряємо, чи є серед виконавців хтось, крім самого автора
+    has_other_assignees = any(pk != author.pk for pk in assignee_map)
+
+    controller_map = {user.pk: user for user in controllers}
+
+    # Якщо нагадування створено для інших людей — автор стає контролером автоматично.
+    # Якщо нагадування персональне — автор буде контролером, тільки якщо сам себе додав.
+    if has_other_assignees:
+        controller_map[author.pk] = author
 
     for user in controller_map.values():
         ReminderParticipant.objects.create(
-            reminder=reminder, user=user, role=ReminderParticipant.Role.CONTROLLER, added_by=author
+            reminder=reminder,
+            user=user,
+            role=ReminderParticipant.Role.CONTROLLER,
+            added_by=author,
         )
     for user in assignee_map.values():
         ReminderParticipant.objects.create(
-            reminder=reminder, user=user, role=ReminderParticipant.Role.ASSIGNEE, added_by=author
+            reminder=reminder,
+            user=user,
+            role=ReminderParticipant.Role.ASSIGNEE,
+            added_by=author,
         )
 
     occurrence = ReminderOccurrence.objects.create(
@@ -202,6 +264,9 @@ def create_reminder(
     )
     response_users = assignee_map.values() if assignee_map else (author,)
     ReminderResponse.objects.bulk_create(
-        [ReminderResponse(occurrence=occurrence, assignee=user) for user in response_users]
+        [
+            ReminderResponse(occurrence=occurrence, assignee=user)
+            for user in response_users
+        ]
     )
     return reminder

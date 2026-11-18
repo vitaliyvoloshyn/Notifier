@@ -9,33 +9,38 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from bot.keyboards import response_keyboard
+
 from .models import (
     Reminder,
     ReminderOccurrence,
     ReminderResponse,
     ReminderResponseEvent,
 )
+from .responses import (
+    claim_due_deferred_responses,
+    expire_due_responses,
+    get_controller_telegram_ids,
+)
 from .services import calculate_next_occurrence
-from .responses import claim_due_deferred_responses, expire_due_responses, get_controller_telegram_ids
-from bot.keyboards import response_keyboard
 
 logger = logging.getLogger(__name__)
 
 
 def _claim_due_occurrences(limit: int = 50):
     """
-Захоплення подій в роботу
-Ця функція безпечно обирає порцію нагадувань, час яких уже настав, і «бронює» їх за поточним воркером.
-• Атомарне блокування (transaction.atomic + select_for_update): База даних блокує вибрані рядки ReminderOccurrence до
-завершення транзакції. Це захищає від стану гонитви (race condition), якщо ви запустите кілька процесів планувальника одночасно.
-• Критерії відбору: Беруться лише активні нагадування (reminder__is_active=True), час яких вже настав (scheduled_at__lte=now),
-у трьох можливих станах:
-	1. SCHEDULED — нові заплановані події.
-	2. FAILED — події, які не вдалося доставити в попередньому циклі.
-	3. PROCESSING зі старим часом старту (processing_started_at < stale_before, тобто понад 10 хвилин тому) — захист
-	від «зависання», якщо попередній процес воркера впав чи був примусово перезапущений посеред роботи.
-• Зміна статусу: Для всіх знайдених записів встановлюється статус PROCESSING і фіксується час початку обробки. Функція
-повертає список ID захоплених подій.
+    Захоплення подій в роботу
+    Ця функція безпечно обирає порцію нагадувань, час яких уже настав, і «бронює» їх за поточним воркером.
+    • Атомарне блокування (transaction.atomic + select_for_update): База даних блокує вибрані рядки ReminderOccurrence до
+    завершення транзакції. Це захищає від стану гонитви (race condition), якщо ви запустите кілька процесів планувальника одночасно.
+    • Критерії відбору: Беруться лише активні нагадування (reminder__is_active=True), час яких вже настав (scheduled_at__lte=now),
+    у трьох можливих станах:
+            1. SCHEDULED — нові заплановані події.
+            2. FAILED — події, які не вдалося доставити в попередньому циклі.
+            3. PROCESSING зі старим часом старту (processing_started_at < stale_before, тобто понад 10 хвилин тому) — захист
+            від «зависання», якщо попередній процес воркера впав чи був примусово перезапущений посеред роботи.
+    • Зміна статусу: Для всіх знайдених записів встановлюється статус PROCESSING і фіксується час початку обробки. Функція
+    повертає список ID захоплених подій.
     """
     now = timezone.now()
     stale_before = now - timedelta(minutes=10)
@@ -51,7 +56,10 @@ def _claim_due_occurrences(limit: int = 50):
             .filter(
                 Q(status=ReminderOccurrence.Status.SCHEDULED)
                 | Q(status=ReminderOccurrence.Status.FAILED)
-                | Q(status=ReminderOccurrence.Status.PROCESSING, processing_started_at__lt=stale_before)
+                | Q(
+                    status=ReminderOccurrence.Status.PROCESSING,
+                    processing_started_at__lt=stale_before,
+                )
             )
             .order_by("scheduled_at")[:limit]
         )
@@ -59,7 +67,9 @@ def _claim_due_occurrences(limit: int = 50):
             occurrence.status = ReminderOccurrence.Status.PROCESSING
             occurrence.processing_started_at = now
             occurrence.error_message = ""
-            occurrence.save(update_fields=["status", "processing_started_at", "error_message"])
+            occurrence.save(
+                update_fields=["status", "processing_started_at", "error_message"]
+            )
             claimed.append(occurrence.pk)
     return claimed
 
@@ -85,7 +95,9 @@ def _get_pending_responses(occurrence_id: int):
     )
 
 
-def _record_delivery(response_id: int, *, message_id: int | None = None, error: str = ""):
+def _record_delivery(
+    response_id: int, *, message_id: int | None = None, error: str = ""
+):
     """
     Фіксація результату відправки та аудит
     Оновлює стан доставки для конкретного користувача після спроби відправити повідомлення в Telegram.
@@ -114,14 +126,22 @@ def _record_delivery(response_id: int, *, message_id: int | None = None, error: 
 
         response.delivery_status = ReminderResponse.DeliveryStatus.SENT
         response.last_sent_at = now
-        response.deadline_at = now + timedelta(minutes=response.occurrence.reminder.response_timeout_minutes)
+        response.deadline_at = now + timedelta(
+            minutes=response.occurrence.reminder.response_timeout_minutes
+        )
         response.deferred_until = None
         response.telegram_message_id = message_id
         response.delivery_error = ""
-        response.save(update_fields=[
-            "delivery_status", "last_sent_at", "deadline_at", "deferred_until",
-            "telegram_message_id", "delivery_error",
-        ])
+        response.save(
+            update_fields=[
+                "delivery_status",
+                "last_sent_at",
+                "deadline_at",
+                "deferred_until",
+                "telegram_message_id",
+                "delivery_error",
+            ]
+        )
         ReminderResponseEvent.objects.create(
             response=response,
             event_type=ReminderResponseEvent.EventType.NOTIFIED,
@@ -164,7 +184,9 @@ def _finish_occurrence(occurrence_id: int):
         ).exists()
         if failed_exists or pending_delivery_exists:
             occurrence.status = ReminderOccurrence.Status.FAILED
-            occurrence.error_message = "Не всім адресатам вдалося доставити повідомлення."
+            occurrence.error_message = (
+                "Не всім адресатам вдалося доставити повідомлення."
+            )
             occurrence.save(update_fields=["status", "error_message"])
             return
 
@@ -182,14 +204,20 @@ def _finish_occurrence(occurrence_id: int):
                     scheduled_at=next_at,
                 )
                 assignee_ids = list(
-                    reminder.participants.filter(role="assignee").values_list("user_id", flat=True)
+                    reminder.participants.filter(role="assignee").values_list(
+                        "user_id", flat=True
+                    )
                 )
                 if not assignee_ids:
                     assignee_ids = [reminder.author_id]
-                ReminderResponse.objects.bulk_create([
-                    ReminderResponse(occurrence=next_occurrence, assignee_id=user_id)
-                    for user_id in assignee_ids
-                ])
+                ReminderResponse.objects.bulk_create(
+                    [
+                        ReminderResponse(
+                            occurrence=next_occurrence, assignee_id=user_id
+                        )
+                        for user_id in assignee_ids
+                    ]
+                )
 
 
 async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
@@ -220,10 +248,16 @@ async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
                     text=text,
                     reply_markup=response_keyboard(response.pk),
                 )
-                await sync_to_async(_record_delivery)(response.pk, message_id=message.message_id)
+                await sync_to_async(_record_delivery)(
+                    response.pk, message_id=message.message_id
+                )
                 stats["sent"] += 1
-            except Exception as exc:  # Telegram/network errors are recorded and retried next cycle.
-                logger.exception("Не вдалося надіслати ReminderResponse id=%s", response.pk)
+            except (
+                Exception
+            ) as exc:  # Telegram/network errors are recorded and retried next cycle.
+                logger.exception(
+                    "Не вдалося надіслати ReminderResponse id=%s", response.pk
+                )
                 await sync_to_async(_record_delivery)(response.pk, error=str(exc))
                 stats["failed"] += 1
 
@@ -248,7 +282,9 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
     deferred_failed = 0
     for response in deferred_responses:
         reminder = response.occurrence.reminder
-        local_time = timezone.localtime(response.occurrence.scheduled_at, ZoneInfo(reminder.timezone))
+        local_time = timezone.localtime(
+            response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)
+        )
         text = (
             f"⏰ Нагадування (повторно): {reminder.title}\n"
             f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}"
@@ -259,29 +295,44 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
                 text=text,
                 reply_markup=response_keyboard(response.pk),
             )
-            await sync_to_async(_record_delivery)(response.pk, message_id=message.message_id)
+            await sync_to_async(_record_delivery)(
+                response.pk, message_id=message.message_id
+            )
             deferred_sent += 1
         except Exception as exc:
-            logger.exception("Не вдалося повторно надіслати ReminderResponse id=%s", response.pk)
+            logger.exception(
+                "Не вдалося повторно надіслати ReminderResponse id=%s", response.pk
+            )
             await sync_to_async(_record_delivery)(response.pk, error=str(exc))
             deferred_failed += 1
 
     expired = await sync_to_async(expire_due_responses)(limit)
     notified = 0
     for item in expired:
-        if item["notification_policy"] != Reminder.NotificationPolicy.EXCEPTIONS_ONLY and item["notification_policy"] != Reminder.NotificationPolicy.ALL_ACTIONS:
+        if (
+            item["notification_policy"] != Reminder.NotificationPolicy.EXCEPTIONS_ONLY
+            and item["notification_policy"] != Reminder.NotificationPolicy.ALL_ACTIONS
+        ):
             continue
         try:
-            controller_ids = await sync_to_async(get_controller_telegram_ids)(item["reminder_id"])
+            controller_ids = await sync_to_async(get_controller_telegram_ids)(
+                item["reminder_id"]
+            )
         except Reminder.DoesNotExist:
             continue
-        text = (
-            f"⌛ Немає відповіді на нагадування «{item['reminder_title']}» від {item['assignee_name']}."
-        )
+        text = f"⌛ Немає відповіді на нагадування «{item['reminder_title']}» від {item['assignee_name']}."
         for telegram_id in controller_ids:
             try:
                 await bot.send_message(telegram_id, text)
                 notified += 1
             except Exception:
-                logger.exception("Не вдалося повідомити контролера %s про таймаут", telegram_id)
-    return {"deferred": len(deferred_ids), "deferred_sent": deferred_sent, "deferred_failed": deferred_failed, "expired": len(expired), "notified": notified}
+                logger.exception(
+                    "Не вдалося повідомити контролера %s про таймаут", telegram_id
+                )
+    return {
+        "deferred": len(deferred_ids),
+        "deferred_sent": deferred_sent,
+        "deferred_failed": deferred_failed,
+        "expired": len(expired),
+        "notified": notified,
+    }
