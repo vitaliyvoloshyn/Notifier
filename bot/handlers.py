@@ -17,7 +17,6 @@ from bot.keyboards import (
     cancel_keyboard,
     defer_keyboard,
     delete_confirmation_keyboard,
-    main_reply_keyboard,
     reminder_detail_keyboard,
     reminders_list_keyboard,
     reminders_menu_keyboard,
@@ -172,16 +171,9 @@ async def cmd_start(message: Message, state: FSMContext):
     if created:
         user.set_unusable_password()
         await user.asave(update_fields=["password"])
-        await message.answer(
-            f"Привіт, {greeting_name}! Ви зареєстровані.\n"
-            "Налаштувати часовий пояс: /timezone Europe/Kyiv",
-            reply_markup=main_reply_keyboard(),
-        )
+        await message.answer(f"Привіт, {greeting_name}! Ви зареєстровані.")
     else:
-        await message.answer(
-            f"З поверненням, {greeting_name}!",
-            reply_markup=main_reply_keyboard(),
-        )
+        await message.answer(f"З поверненням, {greeting_name}!")
 
 
 @router.message(Command("cancel"))
@@ -933,6 +925,7 @@ async def _apply_and_notify(
     should_notify = (
         reminder.notification_policy == Reminder.NotificationPolicy.ALL_ACTIONS
         or action == "rejected"
+        or bool(audit_event.details.get("late"))
     )
     if should_notify:
         controller_ids = await sync_to_async(
@@ -949,7 +942,9 @@ async def _apply_and_notify(
             )
             status_text = f"відтермінував(ла) «{reminder.title}» до {local_defer:%d.%m.%Y %H:%M} ({reminder.timezone})"
         else:
-            status_text = f"{'виконав(ла)' if action == 'completed' else 'відхилив(ла)'} нагадування «{reminder.title}»"
+            verb = "виконав(ла)" if action == "completed" else "відхилив(ла)"
+            late_suffix = " із запізненням" if audit_event.details.get("late") else ""
+            status_text = f"{verb}{late_suffix} нагадування «{reminder.title}»"
         for telegram_id in controller_ids:
             try:
                 await bot.send_message(telegram_id, f"ℹ️ {actor_name} {status_text}.")

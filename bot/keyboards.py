@@ -3,8 +3,6 @@
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -161,20 +159,6 @@ def delete_confirmation_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
                 )
             ],
         ]
-    )
-
-
-def main_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="🛠 Я контролюю"),
-                KeyboardButton(text="📥 Призначені мені"),
-            ],
-            [KeyboardButton(text="➕ Створити нагадування")],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Оберіть дію...",
     )
 
 

@@ -34,16 +34,22 @@ def apply_response_action(
             raise ResponseActionError(
                 "Це повідомлення вже неактуальне. Скористайтеся останнім нагадуванням."
             )
-        if response.status != ReminderResponse.Status.PENDING:
-            raise ResponseActionError(
-                "На це нагадування вже надано остаточну відповідь."
-            )
         if response.delivery_status != ReminderResponse.DeliveryStatus.SENT:
             raise ResponseActionError(
                 "Нагадування ще не доставлено або воно вже обробляється."
             )
         if response.deferred_until and response.deferred_until > timezone.now():
             raise ResponseActionError("Нагадування вже відтерміновано.")
+
+        is_expired = response.status == ReminderResponse.Status.EXPIRED
+        allowed_statuses = {
+            ReminderResponse.Status.PENDING,
+            ReminderResponse.Status.EXPIRED,
+        }
+        if response.status not in allowed_statuses:
+            raise ResponseActionError(
+                "На це нагадування вже надано остаточну відповідь."
+            )
 
         now = timezone.now()
         if action in {"completed", "rejected"}:
@@ -72,10 +78,15 @@ def apply_response_action(
                 response=response,
                 event_type=event_type,
                 actor=response.assignee,
+                details={"late": True} if is_expired else {},
             )
             return response, event
 
         if action == "defer":
+            if is_expired:
+                raise ResponseActionError(
+                    "Час відповіді вже минув, відтермінування недоступне. Підтвердіть виконання або відхиліть."
+                )
             if defer_until is not None:
                 if timezone.is_naive(defer_until):
                     raise ResponseActionError(
