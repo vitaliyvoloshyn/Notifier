@@ -252,13 +252,14 @@ async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
         for response in responses:
             reminder = response.occurrence.reminder
             text = (
-                f"⏰ Нагадування: {reminder.title}\n"
+                f"⏰ Нагадування:\n<b>{reminder.title}</b>\n"
                 f"Заплановано: {timezone.localtime(response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)).strftime('%d.%m.%Y %H:%M')}"
             )
             try:
                 message = await bot.send_message(
                     chat_id=response.assignee.telegram_id,
                     text=text,
+                    parse_mode="HTML",
                     reply_markup=response_keyboard(response.pk),
                 )
                 await sync_to_async(_record_delivery)(
@@ -302,15 +303,20 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
             response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)
         )
         text = (
-            f"⏰ Нагадування (повторно): {reminder.title}\n"
+            f"⏰ Нагадування (повторно):\n<b>{reminder.title}</b>\n"
             f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}"
         )
+        old_message_id = response.telegram_message_id
         try:
             message = await bot.send_message(
                 chat_id=response.assignee.telegram_id,
                 text=text,
+                parse_mode="HTML",
                 reply_markup=response_keyboard(response.pk),
             )
+            await _clear_old_reply_markup(
+                bot, response.assignee.telegram_id, old_message_id
+            )  # <--- ПРИБИРАЄМО СТАРІ КНОПКИ
             await sync_to_async(_record_delivery)(
                 response.pk, message_id=message.message_id
             )
@@ -357,10 +363,11 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
             response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)
         )
         text = (
-            f"🔔 Настирливе нагадування: {reminder.title}\n"
-            f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🔔 Настирливе нагадування:\n<b>{reminder.title}</b>\n"
+            f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}"
             f"<i>(Повторюється кожні {reminder.nag_interval_minutes} хв до закриття)</i>"
         )
+        old_message_id = response.telegram_message_id  # <--- ЗБЕРІГАЄМО СТАРИЙ ID
         try:
             message = await bot.send_message(
                 chat_id=response.assignee.telegram_id,
@@ -368,6 +375,9 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
                 parse_mode="HTML",
                 reply_markup=response_keyboard(response.pk),
             )
+            await _clear_old_reply_markup(
+                bot, response.assignee.telegram_id, old_message_id
+            )  # <--- ПРИБИРАЄМО СТАРІ КНОПКИ
             # Оновлюємо telegram_message_id, щоб кнопки працювали у новому повідомленні, статус не чіпаємо
             await sync_to_async(_record_nag_delivery)(
                 response.pk, message_id=message.message_id
@@ -401,4 +411,23 @@ def _record_nag_delivery(response_id: int, *, message_id: int):
             response=response,
             event_type=ReminderResponseEvent.EventType.NAGGED,
             details={"telegram_message_id": message_id},
+        )
+
+
+async def _clear_old_reply_markup(bot, chat_id: int, message_id: int | None):
+    """Прибирає інлайн-кнопки з попереднього повідомлення нагадування."""
+    if not message_id:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=None,
+        )
+    except Exception:  # noqa: BLE001
+        # Повідомлення могло бути видалене користувачем або старше 48 годин
+        logger.debug(
+            "Не вдалося прибрати кнопки з повідомлення %s у чаті %s",
+            message_id,
+            chat_id,
         )

@@ -5,7 +5,12 @@ from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
 
-from .models import ReminderParticipant, ReminderResponse, ReminderResponseEvent
+from .models import (
+    Reminder,
+    ReminderParticipant,
+    ReminderResponse,
+    ReminderResponseEvent,
+)
 
 
 class ResponseActionError(Exception):
@@ -38,8 +43,6 @@ def apply_response_action(
             raise ResponseActionError(
                 "Нагадування ще не доставлено або воно вже обробляється."
             )
-        if response.deferred_until and response.deferred_until > timezone.now():
-            raise ResponseActionError("Нагадування вже відтерміновано.")
 
         is_expired = response.status == ReminderResponse.Status.EXPIRED
         allowed_statuses = {
@@ -71,6 +74,26 @@ def apply_response_action(
                     "next_nag_at",
                 ]
             )
+            # Деактивуємо одноразове нагадування, якщо всі виконавці закрили свої відповіді
+            reminder = response.occurrence.reminder
+            if (
+                reminder.is_active
+                and reminder.recurrence_type == Reminder.RecurrenceType.NONE
+            ):
+                has_open_responses = (
+                    ReminderResponse.objects.filter(occurrence=response.occurrence)
+                    .exclude(
+                        status__in=[
+                            ReminderResponse.Status.COMPLETED,
+                            ReminderResponse.Status.REJECTED,
+                        ]
+                    )
+                    .exists()
+                )
+                if not has_open_responses:
+                    reminder.is_active = False
+                    reminder.save(update_fields=["is_active", "updated_at"])
+
             event_type = (
                 ReminderResponseEvent.EventType.COMPLETED
                 if action == "completed"
@@ -85,6 +108,8 @@ def apply_response_action(
             return response, event
 
         if action == "defer":
+            if response.deferred_until and response.deferred_until > timezone.now():
+                raise ResponseActionError("Нагадування вже відтерміновано.")
             if is_expired:
                 raise ResponseActionError(
                     "Час відповіді вже минув, відтермінування недоступне. Підтвердіть виконання або відхиліть."

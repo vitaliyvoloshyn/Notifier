@@ -1,5 +1,6 @@
 """Telegram handlers: reminder creation wizard and response actions."""
 
+import asyncio
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -126,6 +127,7 @@ def _get_response_for_custom_defer(response_id: int, telegram_id: int):
             assignee__telegram_id=telegram_id,
             status=ReminderResponse.Status.PENDING,
             delivery_status=ReminderResponse.DeliveryStatus.SENT,
+            deferred_until__isnull=True,  # <--- НЕ ДАЄМО ПОВТОРНО ВІДТЕРМІНУВАТИ
         )
         .first()
     )
@@ -181,6 +183,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(Command("cancel"))
 async def cancel_dialog(message: Message, state: FSMContext):
+    await _delete_wizard_message(message.bot, message.chat.id, state)
     await state.clear()
     await message.answer("Дію скасовано.")
 
@@ -188,8 +191,11 @@ async def cancel_dialog(message: Message, state: FSMContext):
 @router.callback_query(F.data == "cancel_fsm")
 async def cancel_fsm_callback(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("❌ Дію скасовано.")
-    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:  # noqa: BLE001
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Дію скасовано.")
 
 
 @router.message(Command("timezone"))
@@ -285,8 +291,11 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
             author_id=user.pk, timezone=user.timezone or "Europe/Kyiv"
         )
         await state.set_state(ReminderCreation.title)
-        await callback.message.answer(
-            "Як назвати нове нагадування?", reply_markup=cancel_keyboard()
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Як назвати нове нагадування?",
+            reply_markup=cancel_keyboard(),
         )
         await callback.answer()
         return
@@ -526,7 +535,9 @@ async def start_reminder_creation(message: Message, state: FSMContext):
         return
     await state.update_data(author_id=user.pk, timezone=user.timezone or "Europe/Kyiv")
     await state.set_state(ReminderCreation.title)
-    await message.answer(
+    await _ask_wizard_step(
+        message,
+        state,
         "Як назвати нагадування? Надішліть короткий текст.",
         reply_markup=cancel_keyboard(),
     )
@@ -536,7 +547,9 @@ async def start_reminder_creation(message: Message, state: FSMContext):
 async def creation_title(message: Message, state: FSMContext):
     title = (message.text or "").strip()
     if not title or len(title) > 255:
-        await message.answer(
+        await _ask_wizard_step(
+            message,
+            state,
             "Назва має містити від 1 до 255 символів. Спробуйте ще раз.",
             reply_markup=cancel_keyboard(),
         )
@@ -544,7 +557,9 @@ async def creation_title(message: Message, state: FSMContext):
     await state.update_data(title=title)
     data = await state.get_data()
     await state.set_state(ReminderCreation.first_datetime)
-    await message.answer(
+    await _ask_wizard_step(
+        message,
+        state,
         f"Коли нагадати? Часовий пояс: {data['timezone']}.\n"
         "Введіть дату й час: ДД.ММ.РРРР ГГ:ХХ\nНаприклад: 18.11.2026 09:30",
         reply_markup=cancel_keyboard(),
@@ -558,20 +573,26 @@ async def creation_datetime(message: Message, state: FSMContext):
         data = await state.get_data()
         utc_dt = normalize_first_datetime(local_dt, data["timezone"])
         if utc_dt <= django_timezone.now():
-            await message.answer(
+            await _ask_wizard_step(
+                message,
+                state,
                 "Дата й час мають бути в майбутньому. Введіть інший час.",
                 reply_markup=cancel_keyboard(),
             )
             return
     except (ValueError, ValidationError) as exc:
-        await message.answer(
+        await _ask_wizard_step(
+            message,
+            state,
             str(exc) or "Не вдалося розпізнати дату. Спробуйте ще раз.",
             reply_markup=cancel_keyboard(),
         )
         return
     await state.update_data(first_reminder_at=local_dt.isoformat())
     await state.set_state(ReminderCreation.recurrence)
-    await message.answer(
+    await _ask_wizard_step(
+        message,
+        state,
         "Оберіть частоту повторення:",
         reply_markup=repeat_time_keyboard(),
     )
@@ -582,7 +603,9 @@ async def _process_recurrence_choice(
 ):
     recurrence = _parse_recurrence(raw_value)
     if recurrence is None:
-        await target.answer(
+        await _ask_wizard_step(
+            target,
+            state,
             "Не розпізнав варіант. Оберіть кнопку або введіть: одноразове, щодня,"
             " щотижня, щомісяця або щороку.",
             reply_markup=repeat_time_keyboard(),
@@ -592,14 +615,18 @@ async def _process_recurrence_choice(
     await state.update_data(recurrence_type=recurrence)
     if recurrence == Reminder.RecurrenceType.NONE:
         await state.set_state(ReminderCreation.assignees)
-        await target.answer(
+        await _ask_wizard_step(
+            target,
+            state,
             "Кому призначити нагадування? Вкажіть @username або Telegram ID через кому.\n"
             "Якщо Ви створюєте нагадування для себе — натисніть Пропустити.",
             reply_markup=skip_keyboard(),
         )
     else:
         await state.set_state(ReminderCreation.interval)
-        await target.answer(
+        await _ask_wizard_step(
+            target,
+            state,
             "Кожен який інтервал? Введіть ціле число: 1 — кожен період, 2 — через один, тощо.",
             reply_markup=cancel_keyboard(),
         )
@@ -608,8 +635,8 @@ async def _process_recurrence_choice(
 @router.callback_query(ReminderCreation.recurrence, F.data.startswith("rec:"))
 async def creation_recurrence_callback(callback: CallbackQuery, state: FSMContext):
     raw_value = callback.data.split(":", 1)[1]
-    await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
+    await _delete_wizard_message(callback.bot, callback.message.chat.id, state)
     await _process_recurrence_choice(callback.message, state, raw_value)
 
 
@@ -625,13 +652,18 @@ async def creation_interval(message: Message, state: FSMContext):
         if not 1 <= interval <= 365:
             raise ValueError
     except ValueError:
-        await message.answer(
-            "Введіть ціле число від 1 до 365.", reply_markup=cancel_keyboard()
+        await _ask_wizard_step(
+            message,
+            state,
+            "Введіть ціле число від 1 до 365.",
+            reply_markup=skip_keyboard(),
         )
         return
     await state.update_data(recurrence_interval=interval)
     await state.set_state(ReminderCreation.assignees)
-    await message.answer(
+    await _ask_wizard_step(
+        message,
+        state,
         "Кому призначити нагадування? Вкажіть @username або Telegram ID через кому.\n"
         "Якщо Ви створюєте нагадування для себе — натисніть Пропустити.",
         reply_markup=skip_keyboard(),
@@ -662,16 +694,13 @@ async def _proceed_to_controllers(
         )
 
     await state.set_state(ReminderCreation.controllers)
-    await target.answer(
-        text,
-        reply_markup=skip_keyboard(),
-    )
+    await _ask_wizard_step(target, state, text, reply_markup=skip_keyboard())
 
 
 @router.callback_query(ReminderCreation.assignees, F.data == "skip")
 async def skip_assignees_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
+    await _delete_wizard_message(callback.bot, callback.message.chat.id, state)
     await _proceed_to_controllers(callback.message, state, [])
 
 
@@ -684,7 +713,9 @@ async def creation_assignees(message: Message, state: FSMContext):
             raw
         )
         if missing:
-            await message.answer(
+            await _ask_wizard_step(
+                message,
+                state,
                 "Не знайшов зареєстрованих користувачів: "
                 + ", ".join(missing)
                 + ". Вони мають хоча б один раз запустити бота через /start. Спробуйте ще раз або натисніть Пропустити.",
@@ -722,6 +753,8 @@ async def _finalize_reminder_creation(
             nag_interval_minutes=nag_interval_minutes,
         )
     except (ValidationError, ValueError) as exc:
+        await _delete_wizard_message(target.bot, target.chat.id, state)
+        await target.delete()
         await state.clear()
         await target.answer(
             f"Не вдалося створити нагадування: {exc}\nСпробуйте ще раз."
@@ -735,8 +768,14 @@ async def _finalize_reminder_creation(
         if reminder.nag_interval_minutes
         else ""
     )
+    await _delete_wizard_message(target.bot, target.chat.id, state)
+    if target.from_user and not target.from_user.is_bot:
+        try:
+            await target.delete()
+        except Exception:  # noqa: BLE001, S110
+            pass
     await state.clear()
-    await target.answer(
+    final_msg = await target.answer(
         "✅ Нагадування створено!\n"
         f"«{reminder.title}»\n"
         f"Перше спрацювання: {local_at:%d.%m.%Y %H:%M} ({reminder.timezone})\n"
@@ -749,6 +788,7 @@ async def _finalize_reminder_creation(
         + nag_text
         + f"\nВиконавців: {len(assignees) if assignees else 1}."
     )
+    asyncio.create_task(_delete_message_after_delay(final_msg, 5))
 
 
 async def _proceed_to_nagging(
@@ -756,7 +796,9 @@ async def _proceed_to_nagging(
 ):
     await state.update_data(controller_ids=controller_ids)
     await state.set_state(ReminderCreation.nagging)
-    await target.answer(
+    await _ask_wizard_step(
+        target,
+        state,
         "Увімкнути настирливі нагадування? Нагадування будуть дублюватися через заданий термін, поки Ви їх не закриєте.",
         reply_markup=nagging_keyboard(),
     )
@@ -764,8 +806,8 @@ async def _proceed_to_nagging(
 
 @router.callback_query(ReminderCreation.controllers, F.data == "skip")
 async def skip_controllers_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
+    await _delete_wizard_message(callback.bot, callback.message.chat.id, state)
     await _proceed_to_nagging(callback.message, state, [])
 
 
@@ -778,7 +820,9 @@ async def creation_controllers(message: Message, state: FSMContext):
             _resolve_users, thread_sensitive=True
         )(raw)
         if missing:
-            await message.answer(
+            await _ask_wizard_step(
+                message,
+                state,
                 "Не знайшов зареєстрованих користувачів: "
                 + ", ".join(missing)
                 + ". Вони мають спочатку виконати /start. Спробуйте ще раз або натисніть Пропустити.",
@@ -987,8 +1031,8 @@ async def _apply_and_notify(
 @router.callback_query(ReminderCreation.nagging, F.data.startswith("nag:"))
 async def creation_nagging_callback(callback: CallbackQuery, state: FSMContext):
     choice = callback.data.split(":", 1)[1]
-    await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
+    await _delete_wizard_message(callback.bot, callback.message.chat.id, state)
 
     if choice == "skip":
         await _finalize_reminder_creation(
@@ -1000,7 +1044,9 @@ async def creation_nagging_callback(callback: CallbackQuery, state: FSMContext):
         )
     elif choice == "custom":
         await state.set_state(ReminderCreation.nagging_custom)
-        await callback.message.answer(
+        await _ask_wizard_step(
+            callback.message,
+            state,
             "Введіть інтервал дублювання у хвилинах (ціле число від 1 до 1440, наприклад: 15):",
             reply_markup=cancel_keyboard(),
         )
@@ -1013,9 +1059,57 @@ async def creation_nagging_custom(message: Message, state: FSMContext):
         if not 1 <= minutes <= 1440:
             raise ValueError
     except ValueError:
-        await message.answer(
+        await _ask_wizard_step(
+            message,
+            state,
             "Введіть ціле число від 1 до 1440 (хвилин).",
             reply_markup=cancel_keyboard(),
         )
         return
     await _finalize_reminder_creation(message, state, nag_interval_minutes=minutes)
+
+
+async def _delete_wizard_message(bot, chat_id: int, state: FSMContext):
+    """Повністю видаляє попереднє повідомлення бота у майстрі створення."""
+    data = await state.get_data()
+    last_msg_id = data.get("wizard_message_id")
+    if not last_msg_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=last_msg_id)
+    except Exception:  # noqa: BLE001
+        # Якщо повідомлення вже видалене або старше 48 годин — просто прибираємо кнопки
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=last_msg_id, reply_markup=None
+            )
+        except Exception:  # noqa S110
+            pass
+    await state.update_data(wizard_message_id=None)
+
+
+async def _ask_wizard_step(
+    target: Message, state: FSMContext, text: str, reply_markup=None
+):
+    """Видаляє попереднє питання бота, повідомлення користувача, надсилає нове та зберігає його ID."""
+    await _delete_wizard_message(target.bot, target.chat.id, state)
+
+    # Видаляємо текстове повідомлення користувача (окрім стартової команди/кнопки, якщо бажаєте)
+    if target.from_user and not target.from_user.is_bot:
+        try:
+            await target.delete()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    sent = await target.answer(text, reply_markup=reply_markup)
+    await state.update_data(wizard_message_id=sent.message_id)
+    return sent
+
+
+async def _delete_message_after_delay(message: Message, delay: int = 5):
+    """Видаляє повідомлення через задану кількість секунд у фоні."""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001, S110
+        pass
