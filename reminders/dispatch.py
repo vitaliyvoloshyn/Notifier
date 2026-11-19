@@ -19,6 +19,7 @@ from .models import (
 )
 from .responses import (
     claim_due_deferred_responses,
+    claim_due_nag_responses,
     expire_due_responses,
     get_controller_telegram_ids,
 )
@@ -126,22 +127,34 @@ def _record_delivery(
 
         response.delivery_status = ReminderResponse.DeliveryStatus.SENT
         response.last_sent_at = now
-        response.deadline_at = now + timedelta(
-            minutes=response.occurrence.reminder.response_timeout_minutes
-        )
+        # Дедлайн ставимо лише якщо відповідь ще в статусі PENDING і дедлайн ще не встановлений
+        if (
+            response.status == ReminderResponse.Status.PENDING
+            and response.deadline_at is None
+        ):
+            response.deadline_at = now + timedelta(
+                minutes=response.occurrence.reminder.response_timeout_minutes
+            )
         response.deferred_until = None
         response.telegram_message_id = message_id
         response.delivery_error = ""
-        response.save(
-            update_fields=[
-                "delivery_status",
-                "last_sent_at",
-                "deadline_at",
-                "deferred_until",
-                "telegram_message_id",
-                "delivery_error",
-            ]
-        )
+
+        update_fields = [
+            "delivery_status",
+            "last_sent_at",
+            "deadline_at",
+            "deferred_until",
+            "telegram_message_id",
+            "delivery_error",
+        ]
+
+        # Якщо увімкнено настирливі нагадування і next_nag_at ще не заплановано — стартуємо таймер
+        nag_interval = response.occurrence.reminder.nag_interval_minutes
+        if nag_interval and response.next_nag_at is None:
+            response.next_nag_at = now + timedelta(minutes=nag_interval)
+            update_fields.append("next_nag_at")
+
+        response.save(update_fields=update_fields)
         ReminderResponseEvent.objects.create(
             response=response,
             event_type=ReminderResponseEvent.EventType.NOTIFIED,
@@ -266,10 +279,13 @@ async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
     return stats
 
 
-def _get_responses_by_ids(response_ids: list[int]):
+def _get_responses_by_ids(response_ids: list[int], *, allow_expired: bool = False):
+    statuses = [ReminderResponse.Status.PENDING]
+    if allow_expired:
+        statuses.append(ReminderResponse.Status.EXPIRED)
     return list(
         ReminderResponse.objects.select_related("assignee", "occurrence__reminder")
-        .filter(pk__in=response_ids, status=ReminderResponse.Status.PENDING)
+        .filter(pk__in=response_ids, status__in=statuses)
         .order_by("pk")
     )
 
@@ -329,10 +345,60 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
                 logger.exception(
                     "Не вдалося повідомити контролера %s про таймаут", telegram_id
                 )
+    nag_ids = await sync_to_async(claim_due_nag_responses)(limit)
+    nag_responses = await sync_to_async(_get_responses_by_ids)(
+        nag_ids, allow_expired=True
+    )
+    nag_sent = 0
+    nag_failed = 0
+    for response in nag_responses:
+        reminder = response.occurrence.reminder
+        local_time = timezone.localtime(
+            response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)
+        )
+        text = (
+            f"🔔 Настирливе нагадування: {reminder.title}\n"
+            f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}\n"
+            f"<i>(Повторюється кожні {reminder.nag_interval_minutes} хв до закриття)</i>"
+        )
+        try:
+            message = await bot.send_message(
+                chat_id=response.assignee.telegram_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=response_keyboard(response.pk),
+            )
+            # Оновлюємо telegram_message_id, щоб кнопки працювали у новому повідомленні, статус не чіпаємо
+            await sync_to_async(_record_nag_delivery)(
+                response.pk, message_id=message.message_id
+            )
+            nag_sent += 1
+        except Exception:
+            logger.exception(
+                "Не вдалося надіслати настирливий дубль ReminderResponse id=%s",
+                response.pk,
+            )
+            nag_failed += 1
+
     return {
         "deferred": len(deferred_ids),
         "deferred_sent": deferred_sent,
         "deferred_failed": deferred_failed,
         "expired": len(expired),
         "notified": notified,
+        "nag_sent": nag_sent,
+        "nag_failed": nag_failed,
     }
+
+
+def _record_nag_delivery(response_id: int, *, message_id: int):
+    with transaction.atomic():
+        response = ReminderResponse.objects.select_for_update().get(pk=response_id)
+        response.telegram_message_id = message_id
+        response.last_sent_at = timezone.now()
+        response.save(update_fields=["telegram_message_id", "last_sent_at"])
+        ReminderResponseEvent.objects.create(
+            response=response,
+            event_type=ReminderResponseEvent.EventType.NAGGED,
+            details={"telegram_message_id": message_id},
+        )

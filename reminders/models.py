@@ -70,6 +70,13 @@ class Reminder(models.Model):
         default=60,
         validators=[MinValueValidator(1)],
     )
+    nag_interval_minutes = models.PositiveIntegerField(
+        "Інтервал настирливих нагадувань (хвилини)",
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="Якщо задано — дублювати нагадування через вказаний інтервал до закриття.",
+    )
 
     is_active = models.BooleanField("Активне", default=True, db_index=True)
 
@@ -85,6 +92,11 @@ class Reminder(models.Model):
             models.CheckConstraint(
                 condition=Q(response_timeout_minutes__gte=1),
                 name="reminder_response_timeout_gte_1",
+            ),
+            models.CheckConstraint(
+                condition=Q(nag_interval_minutes__isnull=True)
+                | Q(nag_interval_minutes__gte=1),
+                name="reminder_nag_interval_gte_1",
             ),
         )
 
@@ -240,6 +252,12 @@ class ReminderResponse(models.Model):
     deferred_until = models.DateTimeField(
         "Відтерміновано до", null=True, blank=True, db_index=True
     )
+    next_nag_at = models.DateTimeField(
+        "Наступне настирливе нагадування",
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     responded_at = models.DateTimeField(
         "Час остаточної відповіді", null=True, blank=True
     )
@@ -266,6 +284,10 @@ class ReminderResponse(models.Model):
                 fields=("delivery_status", "deferred_until"),
                 name="rem_resp_delivery_defer_idx",
             ),
+            models.Index(
+                fields=("status", "next_nag_at"),
+                name="rem_resp_status_nag_idx",
+            ),
         )
 
     def __str__(self):
@@ -282,6 +304,7 @@ class ReminderResponseEvent(models.Model):
         DEFERRED = "deferred", "Відтерміновано"
         EXPIRED = "expired", "Час відповіді минув"
         DELIVERY_FAILED = "delivery_failed", "Помилка доставки"
+        NAGGED = "nagged", "Настирливе нагадування"
 
     response = models.ForeignKey(
         ReminderResponse,

@@ -61,12 +61,14 @@ def apply_response_action(
             response.responded_at = now
             response.deadline_at = None
             response.deferred_until = None
+            response.next_nag_at = None
             response.save(
                 update_fields=[
                     "status",
                     "responded_at",
                     "deadline_at",
                     "deferred_until",
+                    "next_nag_at",
                 ]
             )
             event_type = (
@@ -205,3 +207,33 @@ def get_controller_telegram_ids(reminder_id: int) -> list[int]:
     ).values_list("user__telegram_id", flat=True)
 
     return list(dict.fromkeys(controller_ids))
+
+
+def claim_due_nag_responses(limit: int = 100) -> list[int]:
+    """Захоплює відповіді, для яких настав час настирливого дублювання."""
+    now = timezone.now()
+    claimed = []
+    with transaction.atomic():
+        qs = (
+            ReminderResponse.objects.select_for_update()
+            .select_related("occurrence__reminder")
+            .filter(
+                occurrence__reminder__is_active=True,
+                occurrence__reminder__nag_interval_minutes__isnull=False,
+                status__in=[
+                    ReminderResponse.Status.PENDING,
+                    ReminderResponse.Status.EXPIRED,
+                ],
+                delivery_status=ReminderResponse.DeliveryStatus.SENT,
+                next_nag_at__isnull=False,
+                next_nag_at__lte=now,
+            )
+            .order_by("next_nag_at")[:limit]
+        )
+        for response in qs:
+            interval = response.occurrence.reminder.nag_interval_minutes
+            # Одразу плануємо наступний цикл, щоб уникнути дублювання при конкурентних воркерах
+            response.next_nag_at = now + timedelta(minutes=interval)
+            response.save(update_fields=["next_nag_at"])
+            claimed.append(response.pk)
+    return claimed

@@ -196,3 +196,14 @@ def repeat_time_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(1, 2, 2, 1)
 
     return builder.as_markup()
+
+
+def nagging_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Кожні 5 хв", callback_data="nag:5")
+    builder.button(text="Кожні 10 хв", callback_data="nag:10")
+    builder.button(text="Свій інтервал", callback_data="nag:custom")
+    builder.button(text="Пропустити", callback_data="nag:skip")
+    builder.attach(InlineKeyboardBuilder.from_markup(cancel_keyboard()))
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()

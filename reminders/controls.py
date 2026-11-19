@@ -108,6 +108,7 @@ def get_reminder_detail(reminder_id: int, telegram_id: int) -> dict | None:
         "is_controller": is_controller,
         "participants": participants,
         "response_counts": response_counts,
+        "nag_interval_minutes": reminder.nag_interval_minutes,
     }
 
 

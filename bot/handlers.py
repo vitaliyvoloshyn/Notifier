@@ -17,6 +17,7 @@ from bot.keyboards import (
     cancel_keyboard,
     defer_keyboard,
     delete_confirmation_keyboard,
+    nagging_keyboard,
     reminder_detail_keyboard,
     reminders_list_keyboard,
     reminders_menu_keyboard,
@@ -51,6 +52,8 @@ class ReminderCreation(StatesGroup):
     interval = State()
     assignees = State()
     controllers = State()
+    nagging = State()  # <--- НОВИЙ СТАН
+    nagging_custom = State()  # <--- НОВИЙ СТАН ДЛЯ ВВОДУ ХВИЛИН
 
 
 class CustomDefer(StatesGroup):
@@ -320,6 +323,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
                 "Нагадування не знайдено або у вас немає доступу.", show_alert=True
             )
             return
+
         await state.update_data(reminder_list_mode=mode)
         zone = ZoneInfo(detail["timezone"])
         first = detail["first_reminder_at"].astimezone(zone).strftime("%d.%m.%Y %H:%M")
@@ -349,6 +353,10 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
                     lines.append(
                         f"• {'Контролер' if role == 'controller' else 'Виконавець'}: {name}"
                     )
+        if detail.get("nag_interval_minutes"):
+            lines.append(
+                f"🔔 Настирливе нагадування: кожні {detail['nag_interval_minutes']} хв"
+            )
         await callback.message.edit_text(
             "\n".join(lines),
             reply_markup=reminder_detail_keyboard(
@@ -687,12 +695,18 @@ async def creation_assignees(message: Message, state: FSMContext):
 
 
 async def _finalize_reminder_creation(
-    target: Message, state: FSMContext, controllers: list[TelegramUser]
+    target: Message, state: FSMContext, nag_interval_minutes: int | None = None
 ):
     data = await state.get_data()
     author = await TelegramUser.objects.aget(pk=data["author_id"])
     assignees = await sync_to_async(
-        lambda: list(TelegramUser.objects.filter(pk__in=data["assignee_ids"])),
+        lambda: list(TelegramUser.objects.filter(pk__in=data.get("assignee_ids", []))),
+        thread_sensitive=True,
+    )()
+    controllers = await sync_to_async(
+        lambda: list(
+            TelegramUser.objects.filter(pk__in=data.get("controller_ids", []))
+        ),
         thread_sensitive=True,
     )()
     try:
@@ -705,6 +719,7 @@ async def _finalize_reminder_creation(
             assignees=assignees,
             controllers=controllers,
             timezone_name=data["timezone"],
+            nag_interval_minutes=nag_interval_minutes,
         )
     except (ValidationError, ValueError) as exc:
         await state.clear()
@@ -715,6 +730,11 @@ async def _finalize_reminder_creation(
 
     local_at = reminder.first_reminder_at.astimezone(ZoneInfo(reminder.timezone))
     recurrence_label = reminder.get_recurrence_type_display()
+    nag_text = (
+        f"\n🔔 Настирливе повторення: кожні {reminder.nag_interval_minutes} хв"
+        if reminder.nag_interval_minutes
+        else ""
+    )
     await state.clear()
     await target.answer(
         "✅ Нагадування створено!\n"
@@ -726,7 +746,19 @@ async def _finalize_reminder_creation(
             if reminder.recurrence_type != Reminder.RecurrenceType.NONE
             else ""
         )
+        + nag_text
         + f"\nВиконавців: {len(assignees) if assignees else 1}."
+    )
+
+
+async def _proceed_to_nagging(
+    target: Message, state: FSMContext, controller_ids: list[int]
+):
+    await state.update_data(controller_ids=controller_ids)
+    await state.set_state(ReminderCreation.nagging)
+    await target.answer(
+        "Увімкнути настирливі нагадування? Нагадування будуть дублюватися через заданий термін, поки Ви їх не закриєте.",
+        reply_markup=nagging_keyboard(),
     )
 
 
@@ -734,7 +766,7 @@ async def _finalize_reminder_creation(
 async def skip_controllers_callback(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
-    await _finalize_reminder_creation(callback.message, state, [])
+    await _proceed_to_nagging(callback.message, state, [])
 
 
 @router.message(ReminderCreation.controllers)
@@ -753,7 +785,7 @@ async def creation_controllers(message: Message, state: FSMContext):
                 reply_markup=skip_keyboard(),
             )
             return
-    await _finalize_reminder_creation(message, state, controllers)
+    await _proceed_to_nagging(message, state, [user.pk for user in controllers])
 
 
 @router.callback_query(F.data.startswith("rem:"))
@@ -950,3 +982,40 @@ async def _apply_and_notify(
                 await bot.send_message(telegram_id, f"ℹ️ {actor_name} {status_text}.")
             except Exception:
                 logger.exception("Не вдалося сповістити контролера %s", telegram_id)
+
+
+@router.callback_query(ReminderCreation.nagging, F.data.startswith("nag:"))
+async def creation_nagging_callback(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer()
+
+    if choice == "skip":
+        await _finalize_reminder_creation(
+            callback.message, state, nag_interval_minutes=None
+        )
+    elif choice in {"5", "10"}:
+        await _finalize_reminder_creation(
+            callback.message, state, nag_interval_minutes=int(choice)
+        )
+    elif choice == "custom":
+        await state.set_state(ReminderCreation.nagging_custom)
+        await callback.message.answer(
+            "Введіть інтервал дублювання у хвилинах (ціле число від 1 до 1440, наприклад: 15):",
+            reply_markup=cancel_keyboard(),
+        )
+
+
+@router.message(ReminderCreation.nagging_custom)
+async def creation_nagging_custom(message: Message, state: FSMContext):
+    try:
+        minutes = int((message.text or "").strip())
+        if not 1 <= minutes <= 1440:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            "Введіть ціле число від 1 до 1440 (хвилин).",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    await _finalize_reminder_creation(message, state, nag_interval_minutes=minutes)

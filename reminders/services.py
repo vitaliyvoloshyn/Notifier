@@ -177,6 +177,7 @@ def create_reminder(
     timezone_name: str | None = None,
     notification_policy: str = Reminder.NotificationPolicy.EXCEPTIONS_ONLY,
     response_timeout_minutes: int = 60,
+    nag_interval_minutes: int | None = None,
 ) -> Reminder:
     """Створює правило, перше спрацювання, учасників і персональні відповіді.
 
@@ -212,6 +213,17 @@ def create_reminder(
         raise ValidationError(
             {"notification_policy": "Невідома політика інформування."}
         )
+    if nag_interval_minutes is not None:  # noqa: SIM102
+        if (
+            not isinstance(nag_interval_minutes, int)
+            or isinstance(nag_interval_minutes, bool)
+            or not 1 <= nag_interval_minutes <= 1440
+        ):
+            raise ValidationError(
+                {
+                    "nag_interval_minutes": "Інтервал настирливих нагадувань має бути від 1 до 1440 хвилин."
+                }
+            )
 
     selected_timezone = (
         timezone_name or getattr(author, "timezone", "Europe/Kyiv") or "Europe/Kyiv"
@@ -229,6 +241,7 @@ def create_reminder(
         recurrence_interval=recurrence_interval,
         notification_policy=notification_policy,
         response_timeout_minutes=response_timeout_minutes,
+        nag_interval_minutes=nag_interval_minutes,
     )
 
     assignee_map = {user.pk: user for user in assignees}
