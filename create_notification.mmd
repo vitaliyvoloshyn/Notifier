@@ -1,0 +1,79 @@
+sequenceDiagram
+    autonumber
+    actor User as Користувач (Telegram)
+    participant Bot as Aiogram Router (Handlers)
+    participant FSM as FSMContext (State)
+    participant Svc as Бізнес-логіка (Services / ORM)
+    participant DB as База даних (PostgreSQL)
+
+    Note over User, DB: Крок 1. Ініціалізація створення нагадування
+    User->>Bot: Натискає "➕ Створити нагадування" або /new_reminder
+    Bot->>DB: Перевірка/отримання користувача (TelegramUser)
+    DB-->>Bot: Повертає об'єкт користувача
+    Bot->>FSM: Очищення стану, збереження author_id та timezone
+    Bot->>FSM: Встановлення стану ReminderCreation.title
+    Bot-->>User: Запит: "Як назвати нагадування?" (з клавіатурою скасування)
+
+    Note over User, DB: Крок 2. Введення назви
+    User->>Bot: Вводить текст назви
+    Bot->>Bot: Валідація довжини (1-255 символів)
+    Bot->>FSM: Збереження title у стані
+    Bot->>FSM: Встановлення стану ReminderCreation.first_datetime
+    Bot-->>User: Запит: Введіть дату й час (ДД.ММ.РРРР ГГ:ХХ)
+
+    Note over User, DB: Крок 3. Введення дати та часу
+    User->>Bot: Вводить рядок дати/часу (наприклад, 18.11.2026 09:30)
+    Bot->>Bot: _parse_local_datetime() + переведення у UTC (з урахуванням часового поясу)
+    Bot->>Bot: Перевірка: чи час у майбутньому?
+    alt Час у минулому або помилка парсингу
+        Bot-->>User: Повідомлення про помилку валідації
+    else Час валідний
+        Bot->>FSM: Збереження першої дати (ISO format)
+        Bot->>FSM: Встановлення стану ReminderCreation.recurrence
+        Bot-->>User: Вибір частоти повторення (клавіатура repeat_time_keyboard)
+    end
+
+    Note over User, DB: Крок 4. Частота повторення та інтервал
+    User->>Bot: Обирає частоту (кнопка або текст)
+    Bot->>Bot: _parse_recurrence()
+    alt Повторення = NONE (одноразове)
+        Bot->>FSM: Збереження recurrence_type = NONE
+        Bot->>FSM: Встановлення стану ReminderCreation.assignees
+        Bot-->>User: Запит: Вкажіть виконавців або натисніть "Пропустити"
+    else Повторення регулярне (щодня, щотижня тощо)
+        Bot->>FSM: Збереження recurrence_type
+        Bot->>FSM: Встановлення стану ReminderCreation.interval
+        Bot-->>User: Запит: Введіть інтервал (ціле число від 1 до 365)
+        User->>Bot: Вводить інтервал (наприклад, 2)
+        Bot->>FSM: Збереження recurrence_interval
+        Bot->>FSM: Встановлення стану ReminderCreation.assignees
+        Bot-->>User: Запит: Вкажіть виконавців або натисніть "Пропустити"
+    end
+
+    Note over User, DB: Крок 5. Призначення виконавців (Assignees)
+    User->>Bot: Вводить @username / ID або натискає "Пропустити"
+    alt Натиснуто "Пропустити"
+        Bot->>FSM: Збереження assignee_ids = []
+    else Введено список користувачів
+        Bot->>DB: _resolve_users() (пошук TelegramUser за ID/username)
+        DB-->>Bot: Повертає знайдених та відсутніх користувачів
+        alt Є незареєстровані користувачі
+            Bot-->>User: Попередження про відсутніх користувачів (повтор введення)
+        else Усі користувачі знайдені
+            Bot->>FSM: Збереження assignee_ids
+        end
+    end
+    Bot->>FSM: Встановлення стану ReminderCreation.controllers
+    Bot-->>User: Запит: Додати інших контролерів? (або "Пропустити")
+
+    Note over User, DB: Крок 6. Призначення контролерів та фіналізація
+    User->>Bot: Вводить контролерів або натискає "Пропустити"
+    Bot->>DB: _resolve_users() для контролерів
+    DB-->>Bot: Повертає список контролерів
+    Bot->>FSM: Отримання всіх збережених даних з FSM
+    Bot->>Svc: Виклик create_reminder(...) (транзакція в БД)
+    Svc->>DB: Створення Reminder, першого Occurrence та зв'язків
+    DB-->>Svc: Повертає створений об'єкт Reminder
+    Svc-->>Bot: Успішно створено
+    Bot->>FSM: Очищення стану (state.clear())
+    Bot-->>User: ✅ Нагадування створено (підтвердження з деталями)

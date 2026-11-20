@@ -20,6 +20,7 @@ from bot.keyboards import (
     delete_confirmation_keyboard,
     nagging_keyboard,
     reminder_detail_keyboard,
+    reminder_edit_menu_keyboard,
     reminders_list_keyboard,
     reminders_menu_keyboard,
     repeat_time_keyboard,
@@ -32,6 +33,11 @@ from reminders.controls import (
     list_reminders,
     rename_reminder,
     set_reminder_active,
+    update_reminder_nagging,
+    update_reminder_participants,
+    update_reminder_recurrence,
+    update_reminder_schedule,
+    update_reminder_timeout,
 )
 from reminders.models import Reminder, ReminderResponse
 from reminders.responses import (
@@ -63,6 +69,14 @@ class CustomDefer(StatesGroup):
 
 class ReminderManagement(StatesGroup):
     rename_title = State()
+    edit_datetime = State()
+    edit_recurrence = State()
+    edit_interval = State()
+    edit_nagging = State()
+    edit_nagging_custom = State()
+    edit_timeout = State()
+    edit_assignees = State()
+    edit_controllers = State()
 
 
 def _parse_local_datetime(raw: str) -> datetime:
@@ -324,57 +338,7 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
         except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
-        detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
-            reminder_id, telegram_id
-        )
-        if detail is None:
-            await callback.answer(
-                "Нагадування не знайдено або у вас немає доступу.", show_alert=True
-            )
-            return
-
-        await state.update_data(reminder_list_mode=mode)
-        zone = ZoneInfo(detail["timezone"])
-        first = detail["first_reminder_at"].astimezone(zone).strftime("%d.%m.%Y %H:%M")
-        next_at = detail["next_reminder_at"]
-        next_text = (
-            next_at.astimezone(zone).strftime("%d.%m.%Y %H:%M") if next_at else "немає"
-        )
-        counts = detail["response_counts"]
-        lines = [
-            f"📌 {detail['title']}",
-            f"Стан: {'активне' if detail['is_active'] else 'призупинене'}",
-            f"Автор: {detail['author']}",
-            f"Перше спрацювання: {first} ({detail['timezone']})",
-            f"Наступне: {next_text}",
-            f"Повторення: {detail['recurrence_type']} (інтервал {detail['recurrence_interval']})",
-            f"Очікують: {counts['pending']} · Виконано: {counts['completed']} · Відхилено: {counts['rejected']} · Прострочено: {counts['expired']}",
-        ]
-        if detail["is_controller"]:
-            lines.append(f"Сповіщення контролерів: {detail['notification_policy']}")
-            lines.append(f"Тайм-аут відповіді: {detail['response_timeout_minutes']} хв")
-            if detail["participants"]:
-                lines.append("Учасники:")
-                for role, full_name, username, participant_id in detail["participants"]:
-                    name = full_name or (
-                        f"@{username}" if username else str(participant_id)
-                    )
-                    lines.append(
-                        f"• {'Контролер' if role == 'controller' else 'Виконавець'}: {name}"
-                    )
-        if detail.get("nag_interval_minutes"):
-            lines.append(
-                f"🔔 Настирливе нагадування: кожні {detail['nag_interval_minutes']} хв"
-            )
-        await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=reminder_detail_keyboard(
-                reminder_id,
-                can_manage=detail["is_controller"],
-                is_active=detail["is_active"],
-            ),
-        )
-        await callback.answer()
+        await _render_reminder_detail_view(callback, state, reminder_id, mode)
         return
 
     if action in {"pause", "resume"}:
@@ -412,18 +376,152 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
         except IndexError, ValueError:
             await callback.answer("Некоректне нагадування.", show_alert=True)
             return
+
+        # Отримуємо деталі нагадування або перевіряємо автора
         detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
             reminder_id, telegram_id
         )
-        if detail is None or not detail["is_controller"]:
-            await callback.answer("Немає прав на редагування.", show_alert=True)
+        if detail is None:
+            await callback.answer("Нагадування не знайдено.", show_alert=True)
             return
+
+        # Перевірка: чи є користувач автором нагадування
+        reminder_obj = await sync_to_async(
+            lambda: (
+                Reminder.objects.select_related("author").filter(pk=reminder_id).first()
+            ),
+            thread_sensitive=True,
+        )()
+
+        if reminder_obj is None or reminder_obj.author.telegram_id != telegram_id:
+            await callback.answer(
+                "Змінювати нагадування можуть лише їх автори.", show_alert=True
+            )
+            return
+
         await state.clear()
         await state.update_data(rename_reminder_id=reminder_id)
         await state.set_state(ReminderManagement.rename_title)
         await callback.message.answer(
             "Надішліть нову назву нагадування (до 255 символів).",
             reply_markup=cancel_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if action == "edit_menu":
+        reminder_id = int(parts[2])
+        detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
+            reminder_id, telegram_id
+        )
+        if detail is None or not detail["is_controller"]:
+            await callback.answer("Немає прав на редагування.", show_alert=True)
+            return
+        await state.set_state(None)
+        await callback.message.edit_text(
+            f"✏️ Редагування «{detail['title']}»\nОберіть, що саме змінити:",
+            reply_markup=reminder_edit_menu_keyboard(reminder_id),
+        )
+        await callback.answer()
+        return
+
+    if action == "view_id":
+        try:
+            reminder_id = int(parts[2])
+        except IndexError, ValueError:
+            await callback.answer("Некоректне нагадування.", show_alert=True)
+            return
+        data = await state.get_data()
+        mode = data.get("reminder_list_mode", "controlled")
+        await _render_reminder_detail_view(callback, state, reminder_id, mode)
+        return
+
+    if action == "edit_time":
+        reminder_id = int(parts[2])
+        detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
+            reminder_id, telegram_id
+        )
+        if detail is None or not detail["is_controller"]:
+            await callback.answer("Немає прав.", show_alert=True)
+            return
+        await state.update_data(
+            edit_reminder_id=reminder_id, edit_timezone=detail["timezone"]
+        )
+        await state.set_state(ReminderManagement.edit_datetime)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            f"Введіть нову дату й час ({detail['timezone']}) у форматі ДД.ММ.РРРР ГГ:ХХ:",
+            reply_markup=cancel_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if action == "edit_rec":
+        reminder_id = int(parts[2])
+        await state.update_data(edit_reminder_id=reminder_id)
+        await state.set_state(ReminderManagement.edit_recurrence)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Оберіть нову частоту повторення:",
+            reply_markup=repeat_time_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if action == "edit_nag":
+        reminder_id = int(parts[2])
+        await state.update_data(edit_reminder_id=reminder_id)
+        await state.set_state(ReminderManagement.edit_nagging)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Оберіть режим настирливих нагадувань («Пропустити» — вимкнути):",
+            reply_markup=nagging_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if action == "edit_timeout":
+        try:
+            reminder_id = int(parts[2])
+        except IndexError, ValueError:
+            await callback.answer("Некоректне нагадування.", show_alert=True)
+            return
+        detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
+            reminder_id, telegram_id
+        )
+        if detail is None or not detail["is_controller"]:
+            await callback.answer("Немає прав на редагування.", show_alert=True)
+            return
+        await state.update_data(edit_reminder_id=reminder_id)
+        await state.set_state(ReminderManagement.edit_timeout)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            f"Поточний тайм-аут: {detail['response_timeout_minutes']} хв.\n"
+            "Введіть новий час очікування відповіді у хвилинах (ціле число від 1 до 10080):",
+            reply_markup=cancel_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if action in {"edit_assignees", "edit_controllers"}:
+        reminder_id = int(parts[2])
+        role = "assignee" if action == "edit_assignees" else "controller"
+        target_state = (
+            ReminderManagement.edit_assignees
+            if role == "assignee"
+            else ReminderManagement.edit_controllers
+        )
+        await state.update_data(edit_reminder_id=reminder_id, edit_role=role)
+        await state.set_state(target_state)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Вкажіть новий список (@username або Telegram ID через кому) або натисніть «Пропустити», щоб очистити список:",
+            reply_markup=skip_keyboard(),
         )
         await callback.answer()
         return
@@ -509,14 +607,31 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
 @router.message(ReminderManagement.rename_title)
 async def rename_reminder_title(message: Message, state: FSMContext):
     data = await state.get_data()
+    reminder_id = data.get("rename_reminder_id")
+    telegram_id = message.from_user.id
+
+    # Подвійна перевірка автора на етапі збереження повідомлення
+    reminder_obj = await sync_to_async(
+        lambda: (
+            Reminder.objects.select_related("author").filter(pk=reminder_id).first()
+        ),
+        thread_sensitive=True,
+    )()
+
+    if reminder_obj is None or reminder_obj.author.telegram_id != telegram_id:
+        await state.clear()
+        await message.answer("Змінювати нагадування можуть лише їх автори.")
+        return
+
     try:
         ok = await sync_to_async(rename_reminder, thread_sensitive=True)(
-            data["rename_reminder_id"], message.from_user.id, message.text or ""
+            reminder_id, telegram_id, message.text or ""
         )
     except ValueError as exc:
         await message.answer(str(exc), reply_markup=cancel_keyboard())
         return
-    await state.set_state(None)
+
+    await state.clear()
     if ok:
         await message.answer("✅ Назву нагадування змінено.")
     else:
@@ -1113,3 +1228,255 @@ async def _delete_message_after_delay(message: Message, delay: int = 5):
         await message.delete()
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+async def _finish_edit_step(target: Message, state: FSMContext, text: str):
+    data = await state.get_data()
+    reminder_id = data.get("edit_reminder_id")
+    await _delete_wizard_message(target.bot, target.chat.id, state)
+    if target.from_user and not target.from_user.is_bot:
+        try:
+            await target.delete()
+        except Exception:  # noqa: BLE001, S110
+            pass
+    await state.set_state(None)
+    msg = await target.answer(
+        text,
+        reply_markup=reminder_edit_menu_keyboard(reminder_id) if reminder_id else None,
+    )
+
+
+@router.message(ReminderManagement.edit_datetime)
+async def process_edit_datetime(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try:
+        local_dt = _parse_local_datetime(message.text or "")
+        ok = await sync_to_async(update_reminder_schedule, thread_sensitive=True)(
+            data["edit_reminder_id"], message.from_user.id, local_dt
+        )
+    except (ValueError, ValidationError) as exc:
+        await _ask_wizard_step(message, state, str(exc), reply_markup=cancel_keyboard())
+        return
+    if not ok:
+        await _finish_edit_step(message, state, "❌ Не вдалося оновити час.")
+        return
+    await _finish_edit_step(message, state, "✅ Час спрацювання оновлено.")
+
+
+@router.callback_query(ReminderManagement.edit_recurrence, F.data.startswith("rec:"))
+async def process_edit_recurrence(callback: CallbackQuery, state: FSMContext):
+    raw_value = callback.data.split(":", 1)[1]
+    recurrence = _parse_recurrence(raw_value)
+    await callback.answer()
+    if recurrence == Reminder.RecurrenceType.NONE:
+        data = await state.get_data()
+        await sync_to_async(update_reminder_recurrence, thread_sensitive=True)(
+            data["edit_reminder_id"], callback.from_user.id, recurrence, 1
+        )
+        await _finish_edit_step(
+            callback.message, state, "✅ Нагадування змінено на одноразове."
+        )
+    else:
+        await state.update_data(edit_rec_type=recurrence)
+        await state.set_state(ReminderManagement.edit_interval)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Введіть інтервал повторення (ціле число від 1 до 365):",
+            reply_markup=cancel_keyboard(),
+        )
+
+
+@router.message(ReminderManagement.edit_interval)
+async def process_edit_interval(message: Message, state: FSMContext):
+    try:
+        interval = int((message.text or "").strip())
+        if not 1 <= interval <= 365:
+            raise ValueError
+    except ValueError:
+        await _ask_wizard_step(
+            message,
+            state,
+            "Введіть ціле число від 1 до 365.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    data = await state.get_data()
+    await sync_to_async(update_reminder_recurrence, thread_sensitive=True)(
+        data["edit_reminder_id"], message.from_user.id, data["edit_rec_type"], interval
+    )
+    await _finish_edit_step(message, state, "✅ Повторення оновлено.")
+
+
+@router.callback_query(ReminderManagement.edit_nagging, F.data.startswith("nag:"))
+async def process_edit_nagging(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    await callback.answer()
+    data = await state.get_data()
+    if choice == "custom":
+        await state.set_state(ReminderManagement.edit_nagging_custom)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Введіть інтервал дублювання у хвилинах (від 1 до 1440):",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    minutes = None if choice == "skip" else int(choice)
+    await sync_to_async(update_reminder_nagging, thread_sensitive=True)(
+        data["edit_reminder_id"], callback.from_user.id, minutes
+    )
+    status = f"кожні {minutes} хв" if minutes else "вимкнено"
+    await _finish_edit_step(
+        callback.message, state, f"✅ Настирливі нагадування: {status}."
+    )
+
+
+@router.message(ReminderManagement.edit_nagging_custom)
+async def process_edit_nagging_custom(message: Message, state: FSMContext):
+    try:
+        minutes = int((message.text or "").strip())
+        if not 1 <= minutes <= 1440:
+            raise ValueError
+    except ValueError:
+        await _ask_wizard_step(
+            message,
+            state,
+            "Введіть ціле число від 1 до 1440.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    data = await state.get_data()
+    await sync_to_async(update_reminder_nagging, thread_sensitive=True)(
+        data["edit_reminder_id"], message.from_user.id, minutes
+    )
+    await _finish_edit_step(
+        message, state, f"✅ Настирливі нагадування: кожні {minutes} хв."
+    )
+
+
+@router.callback_query(ReminderManagement.edit_assignees, F.data == "skip")
+@router.callback_query(ReminderManagement.edit_controllers, F.data == "skip")
+async def process_edit_participants_skip(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    await sync_to_async(update_reminder_participants, thread_sensitive=True)(
+        data["edit_reminder_id"],
+        callback.from_user.id,
+        role=data["edit_role"],
+        users=[],
+    )
+    await _finish_edit_step(callback.message, state, "✅ Список учасників оновлено.")
+
+
+@router.message(ReminderManagement.edit_assignees)
+@router.message(ReminderManagement.edit_controllers)
+async def process_edit_participants_text(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    users, missing = await sync_to_async(_resolve_users, thread_sensitive=True)(raw)
+    if missing:
+        await _ask_wizard_step(
+            message,
+            state,
+            "Не знайдено користувачів: " + ", ".join(missing) + ". Спробуйте ще раз:",
+            reply_markup=skip_keyboard(),
+        )
+        return
+    data = await state.get_data()
+    await sync_to_async(update_reminder_participants, thread_sensitive=True)(
+        data["edit_reminder_id"],
+        message.from_user.id,
+        role=data["edit_role"],
+        users=users,
+    )
+    await _finish_edit_step(message, state, "✅ Список учасників оновлено.")
+
+
+async def _render_reminder_detail_view(
+    callback: CallbackQuery, state: FSMContext, reminder_id: int, mode: str
+):
+    telegram_id = callback.from_user.id
+    detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
+        reminder_id, telegram_id
+    )
+    if detail is None:
+        await callback.answer(
+            "Нагадування не знайдено або у вас немає доступу.", show_alert=True
+        )
+        return
+
+    await state.update_data(reminder_list_mode=mode)
+    zone = ZoneInfo(detail["timezone"])
+    first = detail["first_reminder_at"].astimezone(zone).strftime("%d.%m.%Y %H:%M")
+    next_at = detail["next_reminder_at"]
+    next_text = (
+        next_at.astimezone(zone).strftime("%d.%m.%Y %H:%M") if next_at else "немає"
+    )
+    counts = detail["response_counts"]
+    lines = [
+        f"📌 {detail['title']}",
+        f"Стан: {'активне' if detail['is_active'] else 'призупинене'}",
+        f"Автор: {detail['author']}",
+        f"Перше спрацювання: {first} ({detail['timezone']})",
+        f"Наступне: {next_text}",
+        f"Повторення: {detail['recurrence_type']} (інтервал {detail['recurrence_interval']})",
+        f"Очікують: {counts['pending']} · Виконано: {counts['completed']} · Відхилено: {counts['rejected']} · Прострочено: {counts['expired']}",
+    ]
+    if detail["is_controller"]:
+        lines.append(f"Сповіщення контролерів: {detail['notification_policy']}")
+        lines.append(f"Тайм-аут відповіді: {detail['response_timeout_minutes']} хв")
+        if detail["participants"]:
+            lines.append("Учасники:")
+            for role, full_name, username, participant_id in detail["participants"]:
+                name = full_name or (
+                    f"@{username}" if username else str(participant_id)
+                )
+                lines.append(
+                    f"• {'Контролер' if role == 'controller' else 'Виконавець'}: {name}"
+                )
+    if detail.get("nag_interval_minutes"):
+        lines.append(
+            f"🔔 Настирливе нагадування: кожні {detail['nag_interval_minutes']} хв"
+        )
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=reminder_detail_keyboard(
+            reminder_id,
+            can_manage=detail["is_controller"],
+            is_active=detail["is_active"],
+        ),
+    )
+    await callback.answer()
+
+
+@router.message(ReminderManagement.edit_timeout)
+async def process_edit_timeout(message: Message, state: FSMContext):
+    try:
+        minutes = int((message.text or "").strip())
+        if not 1 <= minutes <= 10080:
+            raise ValueError
+    except ValueError:
+        await _ask_wizard_step(
+            message,
+            state,
+            "Введіть ціле число від 1 до 10080 (хвилин).",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    data = await state.get_data()
+    try:
+        ok = await sync_to_async(update_reminder_timeout, thread_sensitive=True)(
+            data["edit_reminder_id"], message.from_user.id, minutes
+        )
+    except ValueError as exc:
+        await _ask_wizard_step(message, state, str(exc), reply_markup=cancel_keyboard())
+        return
+
+    if not ok:
+        await _finish_edit_step(message, state, "❌ Не вдалося оновити тайм-аут.")
+        return
+    await _finish_edit_step(
+        message, state, f"✅ Тайм-аут відповіді змінено на {minutes} хв."
+    )

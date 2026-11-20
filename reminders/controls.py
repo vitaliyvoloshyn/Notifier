@@ -159,3 +159,242 @@ def delete_reminder(reminder_id: int, telegram_id: int) -> bool:
         return False
     reminder.delete()
     return True
+
+
+# Додайте необхідні імпорти на початку reminders/controls.py:
+from datetime import datetime
+
+from django.utils import timezone as django_timezone
+
+from .models import ReminderOccurrence
+from .services import calculate_next_occurrence, normalize_first_datetime
+
+
+@transaction.atomic
+def update_reminder_schedule(
+    reminder_id: int, telegram_id: int, local_dt: datetime
+) -> bool:
+    """Оновлює час наступного спрацювання та переплановує активне Occurrence."""
+    reminder = (
+        Reminder.objects.select_for_update()
+        .select_related("author")
+        .filter(pk=reminder_id)
+        .first()
+    )
+    if reminder is None or not _can_control(reminder, telegram_id):
+        return False
+
+    utc_dt = normalize_first_datetime(local_dt, reminder.timezone)
+    if utc_dt <= django_timezone.now():
+        raise ValueError("Новий час має бути в майбутньому.")
+
+    # Скасовуємо незавершені заплановані спрацювання на старий час
+    reminder.occurrences.filter(
+        status__in=[
+            ReminderOccurrence.Status.SCHEDULED,
+            ReminderOccurrence.Status.FAILED,
+        ]
+    ).update(status=ReminderOccurrence.Status.CANCELLED)
+
+    reminder.next_reminder_at = utc_dt
+    if reminder.first_reminder_at > django_timezone.now():
+        reminder.first_reminder_at = utc_dt
+    reminder.is_active = True
+    reminder.save(
+        update_fields=[
+            "first_reminder_at",
+            "next_reminder_at",
+            "is_active",
+            "updated_at",
+        ]
+    )
+
+    occurrence, _ = ReminderOccurrence.objects.get_or_create(
+        reminder=reminder,
+        scheduled_at=utc_dt,
+        defaults={"status": ReminderOccurrence.Status.SCHEDULED},
+    )
+    if occurrence.status == ReminderOccurrence.Status.CANCELLED:
+        occurrence.status = ReminderOccurrence.Status.SCHEDULED
+        occurrence.save(update_fields=["status"])
+
+    # Створюємо відповіді для виконавців, якщо їх ще немає для цього спрацювання
+    if not occurrence.responses.exists():
+        assignee_ids = list(
+            reminder.participants.filter(
+                role=ReminderParticipant.Role.ASSIGNEE
+            ).values_list("user_id", flat=True)
+        )
+        if not assignee_ids:
+            assignee_ids = [reminder.author_id]
+        ReminderResponse.objects.bulk_create(
+            [
+                ReminderResponse(occurrence=occurrence, assignee_id=uid)
+                for uid in assignee_ids
+            ]
+        )
+    return True
+
+
+@transaction.atomic
+def update_reminder_recurrence(
+    reminder_id: int,
+    telegram_id: int,
+    recurrence_type: str,
+    recurrence_interval: int = 1,
+) -> bool:
+    """Оновлює періодичність нагадування."""
+    reminder = (
+        Reminder.objects.select_for_update()
+        .select_related("author")
+        .filter(pk=reminder_id)
+        .first()
+    )
+    if reminder is None or not _can_control(reminder, telegram_id):
+        return False
+
+    reminder.recurrence_type = recurrence_type
+    reminder.recurrence_interval = (
+        1 if recurrence_type == Reminder.RecurrenceType.NONE else recurrence_interval
+    )
+
+    # Якщо наступне спрацювання не заплановане, але нагадування стало повторюваним — рахуємо нову дату
+    if (
+        reminder.next_reminder_at is None
+        and recurrence_type != Reminder.RecurrenceType.NONE
+    ):
+        next_at = calculate_next_occurrence(reminder, django_timezone.now())
+        reminder.next_reminder_at = next_at
+        if next_at:
+            occ = ReminderOccurrence.objects.create(
+                reminder=reminder, scheduled_at=next_at
+            )
+            assignee_ids = list(
+                reminder.participants.filter(
+                    role=ReminderParticipant.Role.ASSIGNEE
+                ).values_list("user_id", flat=True)
+            ) or [reminder.author_id]
+            ReminderResponse.objects.bulk_create(
+                [
+                    ReminderResponse(occurrence=occ, assignee_id=uid)
+                    for uid in assignee_ids
+                ]
+            )
+
+    reminder.save(
+        update_fields=[
+            "recurrence_type",
+            "recurrence_interval",
+            "next_reminder_at",
+            "updated_at",
+        ]
+    )
+    return True
+
+
+@transaction.atomic
+def update_reminder_nagging(
+    reminder_id: int, telegram_id: int, nag_interval_minutes: int | None
+) -> bool:
+    """Вмикає, змінює інтервал або вимикає настирливі нагадування."""
+    reminder = (
+        Reminder.objects.select_for_update()
+        .select_related("author")
+        .filter(pk=reminder_id)
+        .first()
+    )
+    if reminder is None or not _can_control(reminder, telegram_id):
+        return False
+
+    reminder.nag_interval_minutes = nag_interval_minutes
+    reminder.save(update_fields=["nag_interval_minutes", "updated_at"])
+
+    # Якщо вимкнули настирливість — знімаємо заплановані дублі з поточних відкритих відповідей
+    if nag_interval_minutes is None:
+        ReminderResponse.objects.filter(
+            occurrence__reminder=reminder,
+            status__in=[
+                ReminderResponse.Status.PENDING,
+                ReminderResponse.Status.EXPIRED,
+            ],
+        ).update(next_nag_at=None)
+    return True
+
+
+@transaction.atomic
+def update_reminder_participants(
+    reminder_id: int, telegram_id: int, *, role: str, users: list
+) -> bool:
+    """Оновлює список виконавців або контролерів нагадування."""
+    reminder = (
+        Reminder.objects.select_for_update()
+        .select_related("author")
+        .filter(pk=reminder_id)
+        .first()
+    )
+    if reminder is None or not _can_control(reminder, telegram_id):
+        return False
+
+    reminder.participants.filter(role=role).delete()
+    user_map = {u.pk: u for u in users}
+
+    if role == ReminderParticipant.Role.CONTROLLER:
+        has_other_assignees = (
+            reminder.participants.filter(role=ReminderParticipant.Role.ASSIGNEE)
+            .exclude(user=reminder.author)
+            .exists()
+        )
+        if has_other_assignees:
+            user_map[reminder.author_id] = reminder.author
+
+    for user in user_map.values():
+        ReminderParticipant.objects.create(
+            reminder=reminder,
+            user=user,
+            role=role,
+            added_by=reminder.author,
+        )
+
+    # Якщо змінили виконавців — оновлюємо отримувачів для майбутнього запланованого спрацювання
+    if role == ReminderParticipant.Role.ASSIGNEE:
+        scheduled_occ = reminder.occurrences.filter(
+            status=ReminderOccurrence.Status.SCHEDULED
+        ).first()
+        if scheduled_occ:
+            scheduled_occ.responses.all().delete()
+            target_users = list(user_map.values()) or [reminder.author]
+            ReminderResponse.objects.bulk_create(
+                [
+                    ReminderResponse(occurrence=scheduled_occ, assignee=u)
+                    for u in target_users
+                ]
+            )
+    return True
+
+
+@transaction.atomic
+def update_reminder_timeout(
+    reminder_id: int, telegram_id: int, timeout_minutes: int
+) -> bool:
+    """Оновлює час очікування відповіді (у хвилинах)."""
+    if (
+        not isinstance(timeout_minutes, int)
+        or isinstance(timeout_minutes, bool)
+        or not 1 <= timeout_minutes <= 10080
+    ):
+        raise ValueError(
+            "Тайм-аут має бути цілим числом від 1 до 10080 хвилин (7 днів)."
+        )
+
+    reminder = (
+        Reminder.objects.select_for_update()
+        .select_related("author")
+        .filter(pk=reminder_id)
+        .first()
+    )
+    if reminder is None or not _can_control(reminder, telegram_id):
+        return False
+
+    reminder.response_timeout_minutes = timeout_minutes
+    reminder.save(update_fields=["response_timeout_minutes", "updated_at"])
+    return True

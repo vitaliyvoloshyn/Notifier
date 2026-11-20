@@ -129,7 +129,7 @@ def reminder_detail_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✏️ Змінити назву", callback_data=f"mgr:rename:{reminder_id}"
+                    text="✏️ Редагувати", callback_data=f"mgr:edit_menu:{reminder_id}"
                 )
             ]
         )
@@ -207,3 +207,47 @@ def nagging_keyboard() -> InlineKeyboardMarkup:
     builder.attach(InlineKeyboardBuilder.from_markup(cancel_keyboard()))
     builder.adjust(2, 2, 1)
     return builder.as_markup()
+
+
+def reminder_edit_menu_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Назву", callback_data=f"mgr:rename:{reminder_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🕒 Час", callback_data=f"mgr:edit_time:{reminder_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔁 Повторення", callback_data=f"mgr:edit_rec:{reminder_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🔔 Настирливість", callback_data=f"mgr:edit_nag:{reminder_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⏳ Тайм-аут", callback_data=f"mgr:edit_timeout:{reminder_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Виконавців",
+                    callback_data=f"mgr:edit_assignees:{reminder_id}",
+                ),
+                InlineKeyboardButton(
+                    text="👁 Контролерів",
+                    callback_data=f"mgr:edit_controllers:{reminder_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ Назад до нагадування",
+                    callback_data=f"mgr:view_id:{reminder_id}",
+                )
+            ],
+        ]
+    )
