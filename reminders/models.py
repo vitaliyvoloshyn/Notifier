@@ -77,6 +77,13 @@ class Reminder(models.Model):
         validators=[MinValueValidator(1)],
         help_text="Якщо задано — дублювати нагадування через вказаний інтервал до закриття.",
     )
+    occurrence_ttl_minutes = models.PositiveIntegerField(
+        "Час актуальності спрацювання (хвилини)",
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text="Інтервал від запланованого часу, після якого поточне спрацювання закривається і всі нагадування по ньому припиняються.",
+    )
 
     is_active = models.BooleanField("Активне", default=True, db_index=True)
 
@@ -98,6 +105,12 @@ class Reminder(models.Model):
                 | Q(nag_interval_minutes__gte=1),
                 name="reminder_nag_interval_gte_1",
             ),
+            models.CheckConstraint(
+                condition=Q(occurrence_ttl_minutes__isnull=True)
+                | Q(occurrence_ttl_minutes__gte=1),
+                name="reminder_occurrence_ttl_gte_1",
+            ),
+
         )
 
     def __str__(self):
@@ -181,6 +194,13 @@ class ReminderOccurrence(models.Model):
         "Початок обробки", null=True, blank=True
     )
     completed_at = models.DateTimeField("Завершено", null=True, blank=True)
+    expires_at = models.DateTimeField(
+        "Актуальне до",
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Момент, після якого спрацювання автоматично закривається.",
+    )
     error_message = models.TextField("Помилка", blank=True)
 
     class Meta:
@@ -215,6 +235,7 @@ class ReminderResponse(models.Model):
         COMPLETED = "completed", "Виконано"
         REJECTED = "rejected", "Відхилено"
         EXPIRED = "expired", "Час відповіді минув"
+        CANCELLED = "cancelled", "Закрито (втратило актуальність)"
 
     class DeliveryStatus(models.TextChoices):
         PENDING = "pending", "Очікує відправлення"
@@ -305,6 +326,7 @@ class ReminderResponseEvent(models.Model):
         EXPIRED = "expired", "Час відповіді минув"
         DELIVERY_FAILED = "delivery_failed", "Помилка доставки"
         NAGGED = "nagged", "Настирливе нагадування"
+        AUTO_CLOSED = "auto_closed", "Автоматично закрито після завершення часу актуальності"
 
     response = models.ForeignKey(
         ReminderResponse,

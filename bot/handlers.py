@@ -26,6 +26,7 @@ from bot.keyboards import (
     repeat_time_keyboard,
     response_keyboard,
     skip_keyboard,
+    ttl_keyboard,
 )
 from reminders.controls import (
     delete_reminder,
@@ -38,6 +39,7 @@ from reminders.controls import (
     update_reminder_recurrence,
     update_reminder_schedule,
     update_reminder_timeout,
+    update_reminder_ttl,
 )
 from reminders.models import Reminder, ReminderResponse
 from reminders.responses import (
@@ -61,6 +63,8 @@ class ReminderCreation(StatesGroup):
     controllers = State()
     nagging = State()  # <--- НОВИЙ СТАН
     nagging_custom = State()  # <--- НОВИЙ СТАН ДЛЯ ВВОДУ ХВИЛИН
+    ttl = State()
+    ttl_custom = State()
 
 
 class CustomDefer(StatesGroup):
@@ -77,6 +81,8 @@ class ReminderManagement(StatesGroup):
     edit_timeout = State()
     edit_assignees = State()
     edit_controllers = State()
+    edit_ttl = State()
+    edit_ttl_custom = State()
 
 
 def _parse_local_datetime(raw: str) -> datetime:
@@ -507,6 +513,35 @@ async def reminder_management_callback(callback: CallbackQuery, state: FSMContex
         await callback.answer()
         return
 
+    if action == "edit_ttl":
+        try:
+            reminder_id = int(parts[2])
+        except IndexError, ValueError:
+            await callback.answer("Некоректне нагадування.", show_alert=True)
+            return
+        detail = await sync_to_async(get_reminder_detail, thread_sensitive=True)(
+            reminder_id, telegram_id
+        )
+        if detail is None or not detail["is_controller"]:
+            await callback.answer("Немає прав на редагування.", show_alert=True)
+            return
+        current_ttl = (
+            f"{detail['occurrence_ttl_minutes']} хв"
+            if detail.get("occurrence_ttl_minutes")
+            else "не обмежено"
+        )
+        await state.update_data(edit_reminder_id=reminder_id)
+        await state.set_state(ReminderManagement.edit_ttl)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            f"Поточний час актуальності: {current_ttl}.\n"
+            "Оберіть новий час автоматичного закриття спрацювання («Пропустити» — вимкнути):",
+            reply_markup=ttl_keyboard(),
+        )
+        await callback.answer()
+        return
+
     if action in {"edit_assignees", "edit_controllers"}:
         reminder_id = int(parts[2])
         role = "assignee" if action == "edit_assignees" else "controller"
@@ -841,9 +876,10 @@ async def creation_assignees(message: Message, state: FSMContext):
 
 
 async def _finalize_reminder_creation(
-    target: Message, state: FSMContext, nag_interval_minutes: int | None = None
+    target: Message, state: FSMContext, occurrence_ttl_minutes: int | None = None
 ):
     data = await state.get_data()
+    nag_interval_minutes = data.get("nag_interval_minutes")
     author = await TelegramUser.objects.aget(pk=data["author_id"])
     assignees = await sync_to_async(
         lambda: list(TelegramUser.objects.filter(pk__in=data.get("assignee_ids", []))),
@@ -866,6 +902,7 @@ async def _finalize_reminder_creation(
             controllers=controllers,
             timezone_name=data["timezone"],
             nag_interval_minutes=nag_interval_minutes,
+            occurrence_ttl_minutes=occurrence_ttl_minutes,
         )
     except (ValidationError, ValueError) as exc:
         await _delete_wizard_message(target.bot, target.chat.id, state)
@@ -1150,13 +1187,9 @@ async def creation_nagging_callback(callback: CallbackQuery, state: FSMContext):
     await _delete_wizard_message(callback.bot, callback.message.chat.id, state)
 
     if choice == "skip":
-        await _finalize_reminder_creation(
-            callback.message, state, nag_interval_minutes=None
-        )
+        await _proceed_to_ttl(callback.message, state, nag_interval_minutes=None)
     elif choice in {"5", "10"}:
-        await _finalize_reminder_creation(
-            callback.message, state, nag_interval_minutes=int(choice)
-        )
+        await _proceed_to_ttl(callback.message, state, nag_interval_minutes=int(choice))
     elif choice == "custom":
         await state.set_state(ReminderCreation.nagging_custom)
         await _ask_wizard_step(
@@ -1181,7 +1214,7 @@ async def creation_nagging_custom(message: Message, state: FSMContext):
             reply_markup=cancel_keyboard(),
         )
         return
-    await _finalize_reminder_creation(message, state, nag_interval_minutes=minutes)
+    await _proceed_to_ttl(message, state, nag_interval_minutes=minutes)
 
 
 async def _delete_wizard_message(bot, chat_id: int, state: FSMContext):
@@ -1439,6 +1472,10 @@ async def _render_reminder_detail_view(
         lines.append(
             f"🔔 Настирливе нагадування: кожні {detail['nag_interval_minutes']} хв"
         )
+    if detail.get("occurrence_ttl_minutes"):
+        lines.append(
+            f"⏱ Автозакриття спрацювання: через {detail['occurrence_ttl_minutes']} хв"
+        )
     await callback.message.edit_text(
         "\n".join(lines),
         reply_markup=reminder_detail_keyboard(
@@ -1479,4 +1516,105 @@ async def process_edit_timeout(message: Message, state: FSMContext):
         return
     await _finish_edit_step(
         message, state, f"✅ Тайм-аут відповіді змінено на {minutes} хв."
+    )
+
+async def _proceed_to_ttl(
+    target: Message, state: FSMContext, nag_interval_minutes: int | None
+):
+    await state.update_data(nag_interval_minutes=nag_interval_minutes)
+    await state.set_state(ReminderCreation.ttl)
+    await _ask_wizard_step(
+        target,
+        state,
+        "Через скільки часу автоматично закрити нагадування, якщо воно не виконане?\n"
+        "Після цього всі сповіщення (повторні, настирливі) по поточному спрацюванню припиняться.\n"
+        "Натисніть «Пропустити», щоб не обмежувати час.",
+        reply_markup=ttl_keyboard(),
+    )
+
+@router.callback_query(ReminderCreation.ttl, F.data.startswith("ttl:"))
+async def creation_ttl_callback(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    await callback.answer()
+    await _delete_wizard_message(callback.bot, callback.message.chat.id, state)
+
+    if choice == "skip":
+        await _finalize_reminder_creation(
+            callback.message, state, occurrence_ttl_minutes=None
+        )
+    elif choice.isdigit():
+        await _finalize_reminder_creation(
+            callback.message, state, occurrence_ttl_minutes=int(choice)
+        )
+    elif choice == "custom":
+        await state.set_state(ReminderCreation.ttl_custom)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Введіть час актуальності у хвилинах (ціле число від 1 до 43200, тобто до 30 днів):",
+            reply_markup=cancel_keyboard(),
+        )
+
+
+@router.message(ReminderCreation.ttl_custom)
+async def creation_ttl_custom(message: Message, state: FSMContext):
+    try:
+        minutes = int((message.text or "").strip())
+        if not 1 <= minutes <= 43200:
+            raise ValueError
+    except ValueError:
+        await _ask_wizard_step(
+            message,
+            state,
+            "Введіть ціле число від 1 до 43200 (хвилин).",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    await _finalize_reminder_creation(message, state, occurrence_ttl_minutes=minutes)
+
+@router.callback_query(ReminderManagement.edit_ttl, F.data.startswith("ttl:"))
+async def process_edit_ttl(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":", 1)[1]
+    await callback.answer()
+    data = await state.get_data()
+    if choice == "custom":
+        await state.set_state(ReminderManagement.edit_ttl_custom)
+        await _ask_wizard_step(
+            callback.message,
+            state,
+            "Введіть час актуальності у хвилинах (ціле число від 1 до 43200):",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+
+    minutes = None if choice == "skip" else int(choice)
+    await sync_to_async(update_reminder_ttl, thread_sensitive=True)(
+        data["edit_reminder_id"], callback.from_user.id, minutes
+    )
+    status = f"через {minutes} хв" if minutes else "вимкнено"
+    await _finish_edit_step(
+        callback.message, state, f"✅ Автозакриття спрацювання: {status}."
+    )
+
+
+@router.message(ReminderManagement.edit_ttl_custom)
+async def process_edit_ttl_custom(message: Message, state: FSMContext):
+    try:
+        minutes = int((message.text or "").strip())
+        if not 1 <= minutes <= 43200:
+            raise ValueError
+    except ValueError:
+        await _ask_wizard_step(
+            message,
+            state,
+            "Введіть ціле число від 1 до 43200.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    data = await state.get_data()
+    await sync_to_async(update_reminder_ttl, thread_sensitive=True)(
+        data["edit_reminder_id"], message.from_user.id, minutes
+    )
+    await _finish_edit_step(
+        message, state, f"✅ Автозакриття спрацювання: через {minutes} хв."
     )

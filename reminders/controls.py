@@ -109,6 +109,7 @@ def get_reminder_detail(reminder_id: int, telegram_id: int) -> dict | None:
         "participants": participants,
         "response_counts": response_counts,
         "nag_interval_minutes": reminder.nag_interval_minutes,
+        "occurrence_ttl_minutes": reminder.occurrence_ttl_minutes,
     }
 
 
@@ -162,7 +163,7 @@ def delete_reminder(reminder_id: int, telegram_id: int) -> bool:
 
 
 # Додайте необхідні імпорти на початку reminders/controls.py:
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.utils import timezone as django_timezone
 
@@ -217,6 +218,12 @@ def update_reminder_schedule(
     if occurrence.status == ReminderOccurrence.Status.CANCELLED:
         occurrence.status = ReminderOccurrence.Status.SCHEDULED
         occurrence.save(update_fields=["status"])
+
+    occurrence.expires_at = (
+        utc_dt + timedelta(minutes=reminder.occurrence_ttl_minutes)
+        if reminder.occurrence_ttl_minutes
+        else None
+    )
 
     # Створюємо відповіді для виконавців, якщо їх ще немає для цього спрацювання
     if not occurrence.responses.exists():
@@ -397,4 +404,34 @@ def update_reminder_timeout(
 
     reminder.response_timeout_minutes = timeout_minutes
     reminder.save(update_fields=["response_timeout_minutes", "updated_at"])
+    return True
+
+@transaction.atomic
+def update_reminder_ttl(
+    reminder_id: int, telegram_id: int, ttl_minutes: int | None
+) -> bool:
+    """Оновлює час актуальності спрацювання (у хвилинах) або вимикає його."""
+    reminder = (
+        Reminder.objects.select_for_update()
+        .select_related("author")
+        .filter(pk=reminder_id)
+        .first()
+    )
+    if reminder is None or not _can_control(reminder, telegram_id):
+        return False
+
+    reminder.occurrence_ttl_minutes = ttl_minutes
+    reminder.save(update_fields=["occurrence_ttl_minutes", "updated_at"])
+
+    # Оновлюємо expires_at для запланованого майбутнього спрацювання
+    scheduled_occ = reminder.occurrences.filter(
+        status=ReminderOccurrence.Status.SCHEDULED
+    ).first()
+    if scheduled_occ:
+        scheduled_occ.expires_at = (
+            scheduled_occ.scheduled_at + timedelta(minutes=ttl_minutes)
+            if ttl_minutes
+            else None
+        )
+        scheduled_occ.save(update_fields=["expires_at"])
     return True

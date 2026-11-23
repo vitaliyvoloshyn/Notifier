@@ -208,6 +208,16 @@ def nagging_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
+def ttl_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="1 година", callback_data="ttl:60")
+    builder.button(text="3 години", callback_data="ttl:180")
+    builder.button(text="Свій інтервал", callback_data="ttl:custom")
+    builder.button(text="Пропустити", callback_data="ttl:skip")
+    builder.attach(InlineKeyboardBuilder.from_markup(cancel_keyboard()))
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
 
 def reminder_edit_menu_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -231,6 +241,9 @@ def reminder_edit_menu_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="⏳ Тайм-аут", callback_data=f"mgr:edit_timeout:{reminder_id}"
+                ),
+                InlineKeyboardButton(
+                    text="⏱ Час життя", callback_data=f"mgr:edit_ttl:{reminder_id}"
                 ),
             ],
             [

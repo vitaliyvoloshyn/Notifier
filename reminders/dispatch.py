@@ -20,6 +20,7 @@ from .models import (
 from .responses import (
     claim_due_deferred_responses,
     claim_due_nag_responses,
+    close_expired_occurrences,
     expire_due_responses,
     get_controller_telegram_ids,
 )
@@ -212,9 +213,15 @@ def _finish_occurrence(occurrence_id: int):
             reminder.next_reminder_at = next_at
             reminder.save(update_fields=["next_reminder_at", "updated_at"])
             if next_at is not None:
+                expires_at = (
+                    next_at + timedelta(minutes=reminder.occurrence_ttl_minutes)
+                    if reminder.occurrence_ttl_minutes
+                    else None
+                )
                 next_occurrence = ReminderOccurrence.objects.create(
                     reminder=reminder,
                     scheduled_at=next_at,
+                    expires_at=expires_at,
                 )
                 assignee_ids = list(
                     reminder.participants.filter(role="assignee").values_list(
@@ -293,6 +300,10 @@ def _get_responses_by_ids(response_ids: list[int], *, allow_expired: bool = Fals
 
 async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
     """Повторно доставляє відтерміновані відповіді та закриває прострочені."""
+    auto_closed = await sync_to_async(close_expired_occurrences)(limit)
+    for item in auto_closed:
+        await _clear_old_reply_markup(bot, item["chat_id"], item["message_id"])
+
     deferred_ids = await sync_to_async(claim_due_deferred_responses)(limit)
     deferred_responses = await sync_to_async(_get_responses_by_ids)(deferred_ids)
     deferred_sent = 0
@@ -398,6 +409,7 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
         "notified": notified,
         "nag_sent": nag_sent,
         "nag_failed": nag_failed,
+        "auto_closed": len(auto_closed),
     }
 
 

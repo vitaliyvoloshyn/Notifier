@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from .models import (
     Reminder,
+    ReminderOccurrence,
     ReminderParticipant,
     ReminderResponse,
     ReminderResponseEvent,
@@ -33,6 +34,8 @@ def apply_response_action(
             .select_related("assignee", "occurrence__reminder")
             .get(pk=response_id)
         )
+        if response.occurrence.expires_at and response.occurrence.expires_at <= timezone.now():
+            raise ResponseActionError("Час актуальності цього нагадування вже вичерпано.")
         if response.assignee.telegram_id != actor_telegram_id:
             raise ResponseActionError("Це нагадування призначене іншому користувачу.")
         if telegram_message_id and response.telegram_message_id != telegram_message_id:
@@ -262,3 +265,83 @@ def claim_due_nag_responses(limit: int = 100) -> list[int]:
             response.save(update_fields=["next_nag_at"])
             claimed.append(response.pk)
     return claimed
+
+def close_expired_occurrences(limit: int = 100) -> list[dict]:
+    """Закриває спрацювання, у яких вичерпано час актуальності (occurrence_ttl_minutes)."""
+    now = timezone.now()
+    closed_responses = []
+
+    with transaction.atomic():
+        occurrences = (
+            ReminderOccurrence.objects.select_for_update()
+            .select_related("reminder")
+            .filter(
+                expires_at__isnull=False,
+                expires_at__lte=now,
+                status__in=[
+                    ReminderOccurrence.Status.SCHEDULED,
+                    ReminderOccurrence.Status.PROCESSING,
+                    ReminderOccurrence.Status.COMPLETED,
+                ],
+            )
+            .order_by("expires_at")[:limit]
+        )
+
+        for occ in occurrences:
+            # 1. Якщо основне повідомлення так і не встигло відправитись (напр., був збій), скасовуємо подію
+            if occ.status in {
+                ReminderOccurrence.Status.SCHEDULED,
+                ReminderOccurrence.Status.PROCESSING,
+            }:
+                occ.status = ReminderOccurrence.Status.CANCELLED
+                occ.completed_at = now
+                occ.save(update_fields=["status", "completed_at"])
+
+            # 2. Знаходимо всі активні/прострочені, але ще не закриті відповіді цього спрацювання
+            open_responses = list(
+                ReminderResponse.objects.select_for_update()
+                .select_related("assignee")
+                .filter(
+                    occurrence=occ,
+                    status__in=[
+                        ReminderResponse.Status.PENDING,
+                        ReminderResponse.Status.EXPIRED,
+                    ],
+                )
+            )
+
+            for resp in open_responses:
+                old_msg_id = resp.telegram_message_id
+                chat_id = resp.assignee.telegram_id
+
+                resp.status = ReminderResponse.Status.CANCELLED
+                resp.responded_at = now
+                resp.deadline_at = None
+                resp.deferred_until = None
+                resp.next_nag_at = None
+                resp.save(
+                    update_fields=[
+                        "status",
+                        "responded_at",
+                        "deadline_at",
+                        "deferred_until",
+                        "next_nag_at",
+                    ]
+                )
+                ReminderResponseEvent.objects.create(
+                    response=resp,
+                    event_type=ReminderResponseEvent.EventType.AUTO_CLOSED,
+                    details={"reason": "occurrence_ttl_expired"},
+                )
+                if old_msg_id:
+                    closed_responses.append(
+                        {"chat_id": chat_id, "message_id": old_msg_id}
+                    )
+
+            # 3. Якщо нагадування одноразове — деактивуємо його повністю
+            reminder = occ.reminder
+            if reminder.is_active and reminder.recurrence_type == Reminder.RecurrenceType.NONE:
+                reminder.is_active = False
+                reminder.save(update_fields=["is_active", "updated_at"])
+
+    return closed_responses
