@@ -259,7 +259,7 @@ async def dispatch_due_occurrences(bot, *, limit: int = 50) -> dict[str, int]:
         for response in responses:
             reminder = response.occurrence.reminder
             text = (
-                f"⏰ Нагадування:\n<b>{reminder.title}</b>\n"
+                f"<b>{reminder.title}</b>\n⏰ Нагадування:\n"
                 f"Заплановано: {timezone.localtime(response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)).strftime('%d.%m.%Y %H:%M')}"
             )
             try:
@@ -314,7 +314,7 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
             response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)
         )
         text = (
-            f"⏰ Нагадування (повторно):\n<b>{reminder.title}</b>\n"
+            f"<b>{reminder.title}</b>\n⏰ Нагадування (повторно):\n"
             f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}"
         )
         old_message_id = response.telegram_message_id
@@ -374,7 +374,7 @@ async def process_response_timeouts(bot, *, limit: int = 100) -> dict[str, int]:
             response.occurrence.scheduled_at, ZoneInfo(reminder.timezone)
         )
         text = (
-            f"🔔 Настирливе нагадування:\n<b>{reminder.title}</b>\n"
+            f"<b>{reminder.title}</b>\n🔔 Настирливе нагадування:\n"
             f"Початковий час: {local_time.strftime('%d.%m.%Y %H:%M')}"
             f"<i>(Повторюється кожні {reminder.nag_interval_minutes} хв до закриття)</i>"
         )

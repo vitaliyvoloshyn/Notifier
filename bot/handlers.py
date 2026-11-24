@@ -1006,6 +1006,15 @@ async def reminder_response_callback(callback: CallbackQuery, state: FSMContext)
                 "Це нагадування не належить вам або вже неактуальне.", show_alert=True
             )
             return
+        if (
+            response.occurrence.expires_at
+            and response.occurrence.expires_at <= django_timezone.now()
+        ):
+            await callback.answer(
+                "Час актуальності цього нагадування вже вичерпано.", show_alert=True
+            )
+            return
+        
         await state.clear()
         await state.update_data(
             custom_response_id=response_id,
@@ -1054,8 +1063,28 @@ async def reminder_response_callback(callback: CallbackQuery, state: FSMContext)
 async def custom_defer_datetime(message: Message, state: FSMContext):
     data = await state.get_data()
     try:
-        local_dt = _parse_local_datetime(message.text or "")
+        response_id = data["custom_response_id"]
+        source_message_id = data["source_message_id"]
         zone = ZoneInfo(data["reminder_timezone"])
+    except (KeyError, ZoneInfoNotFoundError):
+        await state.clear()
+        await message.answer("Сесія відтермінування застаріла. Спробуйте ще раз.")
+        return
+
+    # Одразу перевіряємо, чи нагадування ще актуальне (чи не вичерпано TTL, поки користувач вводив дату)
+    response = await sync_to_async(
+        _get_response_for_custom_defer, thread_sensitive=True
+    )(response_id, message.from_user.id)
+    if response is None or (
+        response.occurrence.expires_at
+        and response.occurrence.expires_at <= django_timezone.now()
+    ):
+        await state.clear()
+        await message.answer("Час актуальності цього нагадування вже вичерпано.")
+        return
+
+    try:
+        local_dt = _parse_local_datetime(message.text or "")
         candidate = local_dt.replace(tzinfo=zone, fold=0)
         round_trip = (
             candidate.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
@@ -1081,9 +1110,7 @@ async def custom_defer_datetime(message: Message, state: FSMContext):
                 reply_markup=cancel_keyboard(),
             )
             return
-        response_id = data["custom_response_id"]
-        source_message_id = data["source_message_id"]
-    except ValueError, KeyError, ZoneInfoNotFoundError:
+    except ValueError:
         await message.answer(
             "Не вдалося розпізнати дату. Формат: ДД.ММ.РРРР ГГ:ХХ.",
             reply_markup=cancel_keyboard(),

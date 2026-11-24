@@ -226,16 +226,16 @@ def create_reminder(
                 }
             )
     if occurrence_ttl_minutes is not None:  # noqa: SIM102
-            if (
-                not isinstance(occurrence_ttl_minutes, int)
-                or isinstance(occurrence_ttl_minutes, bool)
-                or not 1 <= occurrence_ttl_minutes <= 43200 
-            ):
-                raise ValidationError(
-                    {
-                        "occurrence_ttl_minutes": "Інтервал «життя» нагадувань має бути від 1 до 1440 хвилин."
-                    }
-                )
+        if (
+            not isinstance(occurrence_ttl_minutes, int)
+            or isinstance(occurrence_ttl_minutes, bool)
+            or not 1 <= occurrence_ttl_minutes <= 43200
+        ):
+            raise ValidationError(
+                {
+                    "occurrence_ttl_minutes": "Інтервал «життя» нагадувань має бути від 1 до 43200 хвилин."
+                }
+            )
     
 
     selected_timezone = (
@@ -285,9 +285,15 @@ def create_reminder(
             added_by=author,
         )
 
+    expires_at = (
+        first_at + timedelta(minutes=occurrence_ttl_minutes)
+        if occurrence_ttl_minutes
+        else None
+    )
     occurrence = ReminderOccurrence.objects.create(
         reminder=reminder,
         scheduled_at=first_at,
+        expires_at=expires_at,
     )
     response_users = assignee_map.values() if assignee_map else (author,)
     ReminderResponse.objects.bulk_create(

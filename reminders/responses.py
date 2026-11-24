@@ -111,7 +111,7 @@ def apply_response_action(
             return response, event
 
         if action == "defer":
-            if response.deferred_until and response.deferred_until > timezone.now():
+            if response.deferred_until and response.deferred_until > now:
                 raise ResponseActionError("Нагадування вже відтерміновано.")
             if is_expired:
                 raise ResponseActionError(
@@ -138,9 +138,33 @@ def apply_response_action(
                     raise ResponseActionError("Некоректний інтервал відтермінування.")
                 deferred_until = now + timedelta(minutes=defer_minutes)
                 details = {"minutes": defer_minutes}
+
+            reminder = response.occurrence.reminder
+
+            # 1. Зсуваємо настирливі нагадування на: час відтермінування + інтервал настирливості
+            if reminder.nag_interval_minutes:
+                response.next_nag_at = deferred_until + timedelta(
+                    minutes=reminder.nag_interval_minutes
+                )
+            else:
+                response.next_nag_at = None
+
             response.deferred_until = deferred_until
             response.deadline_at = None
-            response.save(update_fields=["deferred_until", "deadline_at"])
+            response.save(
+                update_fields=["deferred_until", "deadline_at", "next_nag_at"]
+            )
+
+            # 2. Ведемо відлік часу життя (TTL) від моменту, на який відтермінували
+            if reminder.occurrence_ttl_minutes:
+                new_expires_at = deferred_until + timedelta(
+                    minutes=reminder.occurrence_ttl_minutes
+                )
+                occurrence = response.occurrence
+                if not occurrence.expires_at or new_expires_at > occurrence.expires_at:
+                    occurrence.expires_at = new_expires_at
+                    occurrence.save(update_fields=["expires_at"])
+
             event = ReminderResponseEvent.objects.create(
                 response=response,
                 event_type=ReminderResponseEvent.EventType.DEFERRED,
@@ -149,8 +173,6 @@ def apply_response_action(
                 details=details,
             )
             return response, event
-
-        raise ResponseActionError("Невідома дія.")
 
 
 def claim_due_deferred_responses(limit: int = 100) -> list[int]:
@@ -253,6 +275,7 @@ def claim_due_nag_responses(limit: int = 100) -> list[int]:
                     ReminderResponse.Status.EXPIRED,
                 ],
                 delivery_status=ReminderResponse.DeliveryStatus.SENT,
+                deferred_until__isnull=True,
                 next_nag_at__isnull=False,
                 next_nag_at__lte=now,
             )
