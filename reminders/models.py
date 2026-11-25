@@ -9,8 +9,8 @@ class Reminder(models.Model):
 
     class RecurrenceType(models.TextChoices):
         NONE = "none", "Одноразове"
+        HOURLY = "hourly", "Щогодини"
         DAILY = "daily", "Щодня"
-        WEEKLY = "weekly", "Щотижня"
         MONTHLY = "monthly", "Щомісяця"
         YEARLY = "yearly", "Щороку"
 

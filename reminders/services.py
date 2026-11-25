@@ -119,17 +119,15 @@ def calculate_next_occurrence(
     anchor_date = anchor_local.date()
     after_date = after_local.date()
 
-    if reminder.recurrence_type == Reminder.RecurrenceType.DAILY:
+    if reminder.recurrence_type == Reminder.RecurrenceType.HOURLY:
+        elapsed_hours = int((after_local - anchor_local).total_seconds() // 3600)
+        periods = max(1, elapsed_hours // interval + 1)
+        target = anchor_local.replace(tzinfo=None) + timedelta(hours=periods * interval)
+    elif reminder.recurrence_type == Reminder.RecurrenceType.DAILY:
         elapsed = (after_date - anchor_date).days
         periods = max(1, elapsed // interval + 1)
         target = datetime.combine(
             anchor_date + timedelta(days=periods * interval), anchor_wall_time
-        )
-    elif reminder.recurrence_type == Reminder.RecurrenceType.WEEKLY:
-        elapsed = (after_date - anchor_date).days
-        periods = max(1, elapsed // (7 * interval) + 1)
-        target = datetime.combine(
-            anchor_date + timedelta(days=periods * 7 * interval), anchor_wall_time
         )
     elif reminder.recurrence_type == Reminder.RecurrenceType.MONTHLY:
         month_delta = (

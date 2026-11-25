@@ -184,8 +184,8 @@ def repeat_time_keyboard() -> InlineKeyboardMarkup:
 
     # Додаємо 5 кнопок вибору
     builder.button(text="Одноразово", callback_data="rec:одноразове")
+    builder.button(text="Щогодини", callback_data="rec:щогодини")
     builder.button(text="Щодня", callback_data="rec:щодня")
-    builder.button(text="Щотижня", callback_data="rec:щотижня")
     builder.button(text="Щомісяця", callback_data="rec:щомісяця")
     builder.button(text="Щороку", callback_data="rec:щороку")
 

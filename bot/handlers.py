@@ -105,10 +105,10 @@ def _parse_recurrence(raw: str) -> str | None:
         "ні, одноразове": Reminder.RecurrenceType.NONE,
         "одноразове": Reminder.RecurrenceType.NONE,
         "0": Reminder.RecurrenceType.NONE,
+        "щогодини": Reminder.RecurrenceType.HOURLY,
+        "година": Reminder.RecurrenceType.HOURLY,
         "щодня": Reminder.RecurrenceType.DAILY,
         "день": Reminder.RecurrenceType.DAILY,
-        "щотижня": Reminder.RecurrenceType.WEEKLY,
-        "тиждень": Reminder.RecurrenceType.WEEKLY,
         "щомісяця": Reminder.RecurrenceType.MONTHLY,
         "місяць": Reminder.RecurrenceType.MONTHLY,
         "щороку": Reminder.RecurrenceType.YEARLY,
@@ -756,8 +756,8 @@ async def _process_recurrence_choice(
         await _ask_wizard_step(
             target,
             state,
-            "Не розпізнав варіант. Оберіть кнопку або введіть: одноразове, щодня,"
-            " щотижня, щомісяця або щороку.",
+            "Не розпізнав варіант. Оберіть кнопку або введіть: одноразове, щогодини,"
+            " щодня, щомісяця або щороку.",
             reply_markup=repeat_time_keyboard(),
         )
         return
